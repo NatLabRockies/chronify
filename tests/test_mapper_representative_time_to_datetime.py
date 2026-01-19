@@ -4,9 +4,9 @@ from datetime import datetime, timedelta, tzinfo
 from typing import Any, Optional
 
 import pandas as pd
-from sqlalchemy import Engine, MetaData
 
-from chronify.sqlalchemy.functions import read_database, write_database
+from chronify.ibis.backend import IbisBackend
+from chronify.ibis.functions import read_query, write_table
 from chronify.time_series_mapper import map_time
 from chronify.time_configs import DatetimeRange
 from chronify.models import TableSchema
@@ -39,31 +39,25 @@ def get_datetime_schema(year: int, tzinfo: tzinfo | None) -> TableSchema:
 
 
 def run_test(
-    engine: Engine,
+    backend: IbisBackend,
     df: pd.DataFrame,
     from_schema: TableSchema,
     to_schema: TableSchema,
     error: Optional[tuple[Any, str]],
 ) -> None:
     # Ingest
-    metadata = MetaData()
-    with engine.begin() as conn:
-        write_database(
-            df, conn, from_schema.name, [from_schema.time_config], if_table_exists="replace"
-        )
-    metadata.reflect(engine, views=True)
+    write_table(backend, df, from_schema.name, [from_schema.time_config], if_exists="replace")
 
     # Map
     if error:
         with pytest.raises(error[0], match=error[1]):
-            map_time(engine, metadata, from_schema, to_schema, check_mapped_timestamps=True)
+            map_time(backend, from_schema, to_schema, check_mapped_timestamps=True)
     else:
-        map_time(engine, metadata, from_schema, to_schema, check_mapped_timestamps=True)
+        map_time(backend, from_schema, to_schema, check_mapped_timestamps=True)
 
         # Check mapped table
-        with engine.connect() as conn:
-            query = f"select * from {to_schema.name}"
-            queried = read_database(query, conn, to_schema.time_config)
+        table = backend.table(to_schema.name)
+        queried = read_query(backend, table, to_schema.time_config)
         queried = queried.sort_values(by=["id", "timestamp"]).reset_index(drop=True)
 
         truth = generate_datetime_data(to_schema.time_config)
@@ -113,7 +107,7 @@ def check_mapped_values(dfo: pd.DataFrame, dfi: pd.DataFrame, time_delta: timede
 
 @pytest.mark.parametrize("interval_shift", [False, True])
 def test_one_week_per_month_by_hour_tz_naive(
-    iter_engines: Engine,
+    iter_backends: IbisBackend,
     one_week_per_month_by_hour_table: tuple[pd.DataFrame, int, TableSchema],
     interval_shift: bool,
 ) -> None:
@@ -129,12 +123,12 @@ def test_one_week_per_month_by_hour_tz_naive(
     if interval_shift:
         to_schema.time_config.interval_type = TimeIntervalType.PERIOD_ENDING
     error = None
-    run_test(iter_engines, df, schema, to_schema, error)
+    run_test(iter_backends, df, schema, to_schema, error)
 
 
 @pytest.mark.parametrize("interval_shift", [False, True])
 def test_one_week_per_month_by_hour_tz_aware(
-    iter_engines: Engine,
+    iter_backends: IbisBackend,
     one_week_per_month_by_hour_table_tz: tuple[pd.DataFrame, int, TableSchema],
     interval_shift: bool,
 ) -> None:
@@ -145,12 +139,12 @@ def test_one_week_per_month_by_hour_tz_aware(
     if interval_shift:
         to_schema.time_config.interval_type = TimeIntervalType.PERIOD_ENDING
     error = None
-    run_test(iter_engines, df, schema, to_schema, error)
+    run_test(iter_backends, df, schema, to_schema, error)
 
 
 @pytest.mark.parametrize("interval_shift", [False, True])
 def test_one_weekday_day_and_one_weekend_day_per_month_by_hour_tz_naive(
-    iter_engines: Engine,
+    iter_backends: IbisBackend,
     one_weekday_day_and_one_weekend_day_per_month_by_hour_table: tuple[
         pd.DataFrame, int, TableSchema
     ],
@@ -163,12 +157,12 @@ def test_one_weekday_day_and_one_weekend_day_per_month_by_hour_tz_naive(
     if interval_shift:
         to_schema.time_config.interval_type = TimeIntervalType.PERIOD_ENDING
     error = None
-    run_test(iter_engines, df, schema, to_schema, error)
+    run_test(iter_backends, df, schema, to_schema, error)
 
 
 @pytest.mark.parametrize("interval_shift", [False, True])
 def test_one_weekday_day_and_one_weekend_day_per_month_by_hour_tz_aware(
-    iter_engines: Engine,
+    iter_backends: IbisBackend,
     one_weekday_day_and_one_weekend_day_per_month_by_hour_table_tz: tuple[
         pd.DataFrame, int, TableSchema
     ],
@@ -181,11 +175,11 @@ def test_one_weekday_day_and_one_weekend_day_per_month_by_hour_tz_aware(
     if interval_shift:
         to_schema.time_config.interval_type = TimeIntervalType.PERIOD_ENDING
     error = None
-    run_test(iter_engines, df, schema, to_schema, error)
+    run_test(iter_backends, df, schema, to_schema, error)
 
 
 def test_instantaneous_interval_type(
-    iter_engines: Engine,
+    iter_backends: IbisBackend,
     one_week_per_month_by_hour_table: tuple[pd.DataFrame, int, TableSchema],
 ) -> None:
     df, _, schema = one_week_per_month_by_hour_table
@@ -193,4 +187,4 @@ def test_instantaneous_interval_type(
     to_schema = get_datetime_schema(2020, None)
     to_schema.time_config.interval_type = TimeIntervalType.INSTANTANEOUS
     error = None
-    run_test(iter_engines, df, schema, to_schema, error)
+    run_test(iter_backends, df, schema, to_schema, error)

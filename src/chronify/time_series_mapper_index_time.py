@@ -5,8 +5,9 @@ import numpy as np
 from datetime import datetime, timedelta
 
 import pandas as pd
-from sqlalchemy import Engine, MetaData, Table, select
 
+from chronify.ibis.backend import IbisBackend
+from chronify.ibis.functions import read_query
 from chronify.models import TableSchema, MappingTableSchema
 from chronify.exceptions import InvalidParameter, ConflictingInputsError
 from chronify.time_series_mapper_base import TimeSeriesMapperBase, apply_mapping
@@ -20,7 +21,6 @@ from chronify.time_configs import (
 from chronify.time_range_generator_factory import make_time_range_generator
 from chronify.time_series_mapper_datetime import MapperDatetimeToDatetime
 from chronify.time import TimeDataType, TimeType, DaylightSavingAdjustmentType, AggregationType
-from chronify.sqlalchemy.functions import read_database
 
 logger = logging.getLogger(__name__)
 
@@ -28,17 +28,14 @@ logger = logging.getLogger(__name__)
 class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
     def __init__(
         self,
-        engine: Engine,
-        metadata: MetaData,
+        backend: IbisBackend,
         from_schema: TableSchema,
         to_schema: TableSchema,
         data_adjustment: Optional[TimeBasedDataAdjustment] = None,
         wrap_time_allowed: bool = False,
     ) -> None:
         # TODO: refactor to use new time configs
-        super().__init__(
-            engine, metadata, from_schema, to_schema, data_adjustment, wrap_time_allowed
-        )
+        super().__init__(backend, from_schema, to_schema, data_adjustment, wrap_time_allowed)
         self._dst_adjustment = self._data_adjustment.daylight_saving_adjustment
         if not isinstance(self._from_schema.time_config, IndexTimeRangeBase):
             msg = "Source schema does not have IndexTimeRangeBase time config. Use a different mapper."
@@ -119,8 +116,7 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
             mapping_schema,
             self._from_schema,
             mapped_schema,
-            self._engine,
-            self._metadata,
+            self._backend,
             TimeBasedDataAdjustment(),
             resampling_operation=resampling_operation,
             scratch_dir=scratch_dir,
@@ -129,8 +125,7 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
 
         # Convert from represented datetime to dst time_config
         MapperDatetimeToDatetime(
-            self._engine,
-            self._metadata,
+            self._backend,
             mapped_schema,
             self._to_schema,
             self._data_adjustment,
@@ -219,10 +214,9 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
         assert tz_col is not None, "Expecting a time zone column for INDEX_TZ_COL"
         from_tz_col = "from_" + tz_col
 
-        with self._engine.connect() as conn:
-            table = Table(self._from_schema.name, self._metadata)
-            stmt = select(table.c[tz_col]).distinct().where(table.c[tz_col].is_not(None))
-            time_zones = read_database(stmt, conn, self._from_time_config)[tz_col].to_list()
+        table = self._backend.table(self._from_schema.name)
+        query = table.select(table[tz_col]).distinct().filter(table[tz_col].notnull())
+        time_zones = read_query(self._backend, query, self._from_time_config)[tz_col].to_list()
 
         from_time_config = self._from_time_config.model_copy(
             update={"time_column": from_time_col, "time_zone_column": from_tz_col}
@@ -290,10 +284,9 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
         assert tz_col is not None, "Expecting a time zone column for INDEX_TZ_COL"
         from_tz_col = "from_" + tz_col
 
-        with self._engine.connect() as conn:
-            table = Table(self._from_schema.name, self._metadata)
-            stmt = select(table.c[tz_col]).distinct().where(table.c[tz_col].is_not(None))
-            time_zones = read_database(stmt, conn, self._from_time_config)[tz_col].to_list()
+        table = self._backend.table(self._from_schema.name)
+        query = table.select(table[tz_col]).distinct().filter(table[tz_col].notnull())
+        time_zones = read_query(self._backend, query, self._from_time_config)[tz_col].to_list()
 
         from_time_config = self._from_time_config.model_copy(
             update={"time_column": from_time_col, "time_zone_column": from_tz_col}

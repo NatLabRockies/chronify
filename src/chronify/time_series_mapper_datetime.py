@@ -3,8 +3,8 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
-from sqlalchemy import Engine, MetaData
 
+from chronify.ibis.backend import IbisBackend
 from chronify.models import TableSchema, MappingTableSchema
 from chronify.exceptions import InvalidParameter, ConflictingInputsError
 from chronify.time_series_mapper_base import TimeSeriesMapperBase, apply_mapping
@@ -22,16 +22,13 @@ logger = logging.getLogger(__name__)
 class MapperDatetimeToDatetime(TimeSeriesMapperBase):
     def __init__(
         self,
-        engine: Engine,
-        metadata: MetaData,
+        backend: IbisBackend,
         from_schema: TableSchema,
         to_schema: TableSchema,
         data_adjustment: Optional[TimeBasedDataAdjustment] = None,
         wrap_time_allowed: bool = False,
     ) -> None:
-        super().__init__(
-            engine, metadata, from_schema, to_schema, data_adjustment, wrap_time_allowed
-        )
+        super().__init__(backend, from_schema, to_schema, data_adjustment, wrap_time_allowed)
         if self._from_schema == self._to_schema and self._data_adjustment is None:
             msg = f"from_schema is the same as to_schema and no data_adjustment, nothing to do.\n{self._from_schema}"
             logger.info(msg)
@@ -77,8 +74,7 @@ class MapperDatetimeToDatetime(TimeSeriesMapperBase):
             mapping_schema,
             self._from_schema,
             self._to_schema,
-            self._engine,
-            self._metadata,
+            self._backend,
             self._data_adjustment,
             scratch_dir=scratch_dir,
             output_file=output_file,

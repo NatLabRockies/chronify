@@ -1,12 +1,14 @@
 import abc
+import warnings
 from zoneinfo import ZoneInfo
 from datetime import tzinfo
-from sqlalchemy import Engine, MetaData, Table, select
 from typing import Optional
 from pathlib import Path
 import pandas as pd
 from pandas import DatetimeTZDtype
 
+from chronify.ibis.backend import IbisBackend
+from chronify.ibis.functions import read_query
 from chronify.models import TableSchema, MappingTableSchema
 from chronify.time_configs import (
     DatetimeRangeBase,
@@ -21,15 +23,13 @@ from chronify.datetime_range_generator import (
 from chronify.exceptions import InvalidParameter, MissingValue
 from chronify.time_series_mapper_base import apply_mapping
 from chronify.time_range_generator_factory import make_time_range_generator
-from chronify.sqlalchemy.functions import read_database
 from chronify.time import TimeDataType, TimeType
 from chronify.time_series_mapper import map_time
 from chronify.time_utils import get_standard_time_zone, is_standard_time_zone
 
 
 def localize_time_zone(
-    engine: Engine,
-    metadata: MetaData,
+    backend: IbisBackend,
     src_schema: TableSchema,
     to_time_zone: tzinfo | None,
     scratch_dir: Optional[Path] = None,
@@ -44,10 +44,8 @@ def localize_time_zone(
 
     Parameters
     ----------
-    engine : sqlalchemy.Engine
-        SQLAlchemy engine.
-    metadata : sqlalchemy.MetaData
-        SQLAlchemy metadata.
+    backend : IbisBackend
+        Ibis backend.
     src_schema : TableSchema
         Defines the source table in the database.
     to_time_zone : tzinfo or None
@@ -65,7 +63,7 @@ def localize_time_zone(
     TableSchema
         Schema of output table with converted timestamps.
     """
-    tzl = TimeZoneLocalizer(engine, metadata, src_schema, to_time_zone)
+    tzl = TimeZoneLocalizer(backend, src_schema, to_time_zone)
     tzl.localize_time_zone(
         scratch_dir=scratch_dir,
         output_file=output_file,
@@ -76,8 +74,7 @@ def localize_time_zone(
 
 
 def localize_time_zone_by_column(
-    engine: Engine,
-    metadata: MetaData,
+    backend: IbisBackend,
     src_schema: TableSchema,
     time_zone_column: Optional[str] = None,
     scratch_dir: Optional[Path] = None,
@@ -89,10 +86,8 @@ def localize_time_zone_by_column(
 
     Parameters
     ----------
-    engine : sqlalchemy.Engine
-        SQLAlchemy engine.
-    metadata : sqlalchemy.MetaData
-        sqlalchemy metadata
+    backend : IbisBackend
+        Ibis backend.
     src_schema : TableSchema
         Defines the source table in the database.
     time_zone_column : Optional[str]
@@ -119,9 +114,7 @@ def localize_time_zone_by_column(
         )
         raise MissingValue(msg)
 
-    tzl = TimeZoneLocalizerByColumn(
-        engine, metadata, src_schema, time_zone_column=time_zone_column
-    )
+    tzl = TimeZoneLocalizerByColumn(backend, src_schema, time_zone_column=time_zone_column)
     tzl.localize_time_zone(
         scratch_dir=scratch_dir,
         output_file=output_file,
@@ -135,12 +128,10 @@ class TimeZoneLocalizerBase(abc.ABC):
 
     def __init__(
         self,
-        engine: Engine,
-        metadata: MetaData,
+        backend: IbisBackend,
         from_schema: TableSchema,
     ):
-        self._engine = engine
-        self._metadata = metadata
+        self._backend = backend
         self._from_schema = from_schema
 
     @staticmethod
@@ -174,13 +165,12 @@ class TimeZoneLocalizer(TimeZoneLocalizerBase):
 
     def __init__(
         self,
-        engine: Engine,
-        metadata: MetaData,
+        backend: IbisBackend,
         from_schema: TableSchema,
         to_time_zone: tzinfo | None,
     ):
         self._check_from_schema(from_schema)
-        super().__init__(engine, metadata, from_schema)
+        super().__init__(backend, from_schema)
         self._to_time_zone = self._check_standard_time_zone(to_time_zone)
         self._to_schema = self.generate_to_schema()
 
@@ -250,8 +240,7 @@ class TimeZoneLocalizer(TimeZoneLocalizerBase):
         check_mapped_timestamps: bool = False,
     ) -> None:
         map_time(
-            engine=self._engine,
-            metadata=self._metadata,
+            backend=self._backend,
             from_schema=self._from_schema,
             to_schema=self._to_schema,
             scratch_dir=scratch_dir,
@@ -288,14 +277,15 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
 
     def __init__(
         self,
-        engine: Engine,
-        metadata: MetaData,
+        backend: IbisBackend,
         from_schema: TableSchema,
         time_zone_column: Optional[str] = None,
     ):
         self._check_from_schema(from_schema)
         self._check_time_zone_column(from_schema, time_zone_column)
-        super().__init__(engine, metadata, from_schema)
+        # Make a deep copy to avoid mutating the original schema
+        from_schema_copy = from_schema.model_copy(deep=True)
+        super().__init__(backend, from_schema_copy)
         if isinstance(self._from_schema.time_config, DatetimeRange):
             self.time_zone_column = time_zone_column
             self._convert_from_time_config_to_datetime_range_with_tz_column()
@@ -324,7 +314,7 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
             and time_zone_column is not None
         ):
             msg = f"Input {time_zone_column=} will be ignored. time_zone_column is already defined in the time_config."
-            raise Warning(msg)
+            warnings.warn(msg, stacklevel=3)
 
         msg = ""
         if isinstance(from_schema.time_config, DatetimeRange) and time_zone_column is None:
@@ -405,9 +395,9 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
                 raise InvalidParameter(msg)
 
     def generate_to_schema(self) -> TableSchema:
-        id_cols = self._from_schema.time_array_id_columns
-        if "time_zone" not in id_cols:
-            id_cols.append("time_zone")
+        id_cols = self._from_schema.time_array_id_columns.copy()
+        if self.time_zone_column not in id_cols:
+            id_cols.append(self.time_zone_column)
         to_schema: TableSchema = self._from_schema.model_copy(
             update={
                 "name": f"{self._from_schema.name}_tz_converted",
@@ -430,8 +420,7 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
             mapping_schema,
             self._from_schema,
             self._to_schema,
-            self._engine,
-            self._metadata,
+            self._backend,
             TimeBasedDataAdjustment(),
             scratch_dir=scratch_dir,
             output_file=output_file,
@@ -439,16 +428,14 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
         )
 
     def _get_time_zones(self) -> list[tzinfo | None]:
-        with self._engine.connect() as conn:
-            table = Table(self._from_schema.name, self._metadata)
-            stmt = (
-                select(table.c[self.time_zone_column])
-                .distinct()
-                .where(table.c[self.time_zone_column].is_not(None))
-            )
-            time_zones = read_database(stmt, conn, self._from_schema.time_config)[
-                self.time_zone_column
-            ].to_list()
+        table = self._backend.table(self._from_schema.name)
+        query = (
+            table.select(table[self.time_zone_column])
+            .distinct()
+            .filter(table[self.time_zone_column].notnull())
+        )
+        df = read_query(self._backend, query, self._from_schema.time_config)
+        time_zones = df[self.time_zone_column].to_list()
 
         if "None" in time_zones and len(time_zones) > 1:
             msg = (

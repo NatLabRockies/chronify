@@ -1,10 +1,11 @@
 from typing import Optional, Generator
 import re
-import sqlalchemy as sa
 from pathlib import Path
 import pandas as pd
 from datetime import datetime
 
+from chronify.ibis.backend import IbisBackend
+from chronify.ibis.functions import read_query, write_table
 from chronify.exceptions import InvalidParameter, InvalidValue
 from chronify.time_series_mapper_base import TimeSeriesMapperBase, apply_mapping
 from chronify.time_configs import (
@@ -18,8 +19,6 @@ from chronify.time_configs import (
 )
 from chronify.datetime_range_generator import DatetimeRangeGenerator
 from chronify.models import MappingTableSchema, TableSchema
-from chronify.sqlalchemy.functions import read_database, write_database
-from chronify.utils.sqlalchemy_table import create_table
 
 
 class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
@@ -51,16 +50,13 @@ class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
 
     def __init__(
         self,
-        engine: sa.Engine,
-        metadata: sa.MetaData,
+        backend: IbisBackend,
         from_schema: TableSchema,
         to_schema: TableSchema,
         data_adjustment: Optional[TimeBasedDataAdjustment] = None,
         wrap_time_allowed: bool = False,
     ) -> None:
-        super().__init__(
-            engine, metadata, from_schema, to_schema, data_adjustment, wrap_time_allowed
-        )
+        super().__init__(backend, from_schema, to_schema, data_adjustment, wrap_time_allowed)
 
         if not isinstance(to_schema.time_config, DatetimeRange):
             msg = "Target schema does not have DatetimeRange time config. Use a different mapper."
@@ -102,8 +98,7 @@ class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
             mapping_schema,
             from_schema,
             self._to_schema,
-            self._engine,
-            self._metadata,
+            self._backend,
             self._data_adjustment,
             scratch_dir=scratch_dir,
             output_file=output_file,
@@ -111,9 +106,8 @@ class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
         )
 
         if drop_table:
-            with self._engine.begin() as conn:
-                table_type = "view" if self._engine.name == "hive" else "table"
-                conn.execute(sa.text(f"DROP {table_type} IF EXISTS {drop_table}"))
+            table_type = "view" if self._backend.name == "spark" else "table"
+            self._backend.execute_sql(f"DROP {table_type} IF EXISTS {drop_table}")
 
     def check_schema_consistency(self) -> None:
         if isinstance(self._from_time_config, MonthDayHourTimeNTZ):
@@ -137,36 +131,39 @@ class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
         """Convert ymdp to ymdh for intermediate mapping."""
         mapping_table_name = "intermediate_ymdp_to_ymdh"
         period_col = self._from_time_config.hour_columns[0]
-        with self._engine.begin() as conn:
-            periods = read_database(
-                f"SELECT DISTINCT {period_col} FROM {self._from_schema.name}",
-                conn,
-                self._from_time_config,
-            )
-            df_mapping = generate_period_mapping(periods.iloc[:, 0])
-            write_database(
-                df_mapping,
-                conn,
-                mapping_table_name,
-                [self._from_time_config],
-                if_table_exists="replace",
-                scratch_dir=scratch_dir,
-            )
 
-        self._metadata.reflect(self._engine)
-        ymdp_table = sa.Table(self._from_schema.name, self._metadata)
-        mapping_table = sa.Table(mapping_table_name, self._metadata)
+        # Read distinct periods
+        table = self._backend.table(self._from_schema.name)
+        query = table.select(table[period_col]).distinct()
+        periods = read_query(self._backend, query, self._from_time_config)
+        df_mapping = generate_period_mapping(periods.iloc[:, 0])
 
-        select_statement = [col for col in ymdp_table.columns if col.name != period_col]
-        select_statement.append(mapping_table.c["hour"])
-        query = (
-            sa.select(*select_statement)
-            .select_from(ymdp_table)
-            .join(mapping_table, ymdp_table.c[period_col] == mapping_table.c["from_period"])
+        write_table(
+            self._backend,
+            df_mapping,
+            mapping_table_name,
+            [self._from_time_config],
+            if_exists="replace",
+            scratch_dir=scratch_dir,
         )
 
+        # Build join query using Ibis
+        ymdp_table = self._backend.table(self._from_schema.name)
+        mapping_table = self._backend.table(mapping_table_name)
+
+        # Select all columns from ymdp_table except period_col, plus hour from mapping
+        ymdp_cols = list(ymdp_table.columns)
+        select_cols = [ymdp_table[col] for col in ymdp_cols if col != period_col]
+        select_cols.append(mapping_table["hour"])
+
+        # Join and select
+        joined = ymdp_table.join(
+            mapping_table, ymdp_table[period_col] == mapping_table["from_period"]
+        )
+        query = joined.select(select_cols)
+
         intermediate_ymdh_table_name = "intermediate_Ymdh"
-        create_table(intermediate_ymdh_table_name, query, self._engine, self._metadata)
+        self._backend.create_table(intermediate_ymdh_table_name, query)
 
         assert isinstance(
             self._from_time_config, YearMonthDayPeriodTimeNTZ
