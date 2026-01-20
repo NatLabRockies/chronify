@@ -1,5 +1,4 @@
-import os
-from typing import Any, Generator
+from typing import Generator
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 

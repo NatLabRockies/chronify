@@ -10,7 +10,7 @@ from typing import Sequence
 import ibis.expr.types as ir
 import pandas as pd
 import pyarrow as pa
-from numpy.dtypes import DateTime64DType, ObjectDType
+from numpy.dtypes import ObjectDType
 from pandas import DatetimeTZDtype
 
 from chronify.exceptions import InvalidOperation, InvalidParameter

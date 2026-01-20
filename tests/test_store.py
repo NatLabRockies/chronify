@@ -454,7 +454,7 @@ def test_map_datetime_to_datetime(
         print("DEBUG: Sample timestamp:")
         print(df_debug["timestamp"].iloc[0])
         print(f"DEBUG: Sample timestamp tz: {df_debug['timestamp'].iloc[0].tzinfo}")
-        
+
         target = pd.Timestamp("2020-11-01 08:00:00", tz="EST")
         print(f"DEBUG: Looking for {target}")
         subset = df_debug[df_debug["timestamp"] == target]
@@ -474,12 +474,14 @@ def test_map_datetime_to_datetime(
         out_file = tmp_path / "data.parquet"
         rel2.to_df().to_parquet(out_file)
         store.create_view_from_parquet(out_file, src_schema)
-        
+
         # DEBUG: Inspect Spark table
         try:
             print("DEBUG: Inspecting generators_pb in Spark")
             spark = store._backend.con
-            df_spark = spark.sql("SELECT timestamp, CAST(timestamp as LONG) as ts_long FROM generators_pb WHERE timestamp >= '2020-11-01 12:00:00' AND timestamp <= '2020-11-01 14:00:00' ORDER BY timestamp")
+            df_spark = spark.sql(
+                "SELECT timestamp, CAST(timestamp as LONG) as ts_long FROM generators_pb WHERE timestamp >= '2020-11-01 12:00:00' AND timestamp <= '2020-11-01 14:00:00' ORDER BY timestamp"
+            )
             df_spark.show()
         except Exception as e:
             print(f"DEBUG: Error inspecting Spark table: {e}")

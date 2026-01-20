@@ -201,6 +201,67 @@ def apply_mapping(
             backend.drop_view(to_schema.name, if_exists=True)
 
 
+def _build_join_predicate(
+    left_table: Any,
+    right_table: Any,
+    key: str,
+    left_type: Any,
+    right_type: Any,
+) -> Any:
+    """Build a join predicate with appropriate type casting."""
+    left_col = left_table[key]
+    right_col = right_table[f"from_{key}"]
+
+    if left_type is None or right_type is None:
+        return left_col == right_col
+
+    left_is_unknown = not hasattr(left_type, "is_timestamp") or str(left_type).startswith(
+        "unknown"
+    )
+    right_is_timestamp = hasattr(right_type, "is_timestamp") and right_type.is_timestamp()
+    left_is_timestamp = hasattr(left_type, "is_timestamp") and left_type.is_timestamp()
+    right_is_string = hasattr(right_type, "is_string") and right_type.is_string()
+    left_is_string = hasattr(left_type, "is_string") and left_type.is_string()
+
+    if left_is_unknown and right_is_timestamp:
+        left_col = left_col.cast("timestamp")
+    elif left_is_timestamp and right_is_string:
+        right_col = right_col.cast("timestamp")
+    elif left_is_string and right_is_timestamp:
+        left_col = left_col.cast("timestamp")
+
+    return left_col == right_col
+
+
+def _get_timestamp_target_dtype(to_schema: TableSchema, backend_name: str) -> Any:
+    """Get the target dtype for timestamp column casting."""
+    time_config = to_schema.time_config
+    if time_config.dtype == TimeDataType.TIMESTAMP_TZ:
+        tz_obj = time_config.start.tzinfo if hasattr(time_config, "start") else None
+        if backend_name == "sqlite":
+            tz_str = "UTC"
+        elif hasattr(tz_obj, "key"):
+            tz_str = tz_obj.key
+        elif tz_obj:
+            tz_str = str(tz_obj)
+        else:
+            tz_str = "UTC"
+        return dt.Timestamp(timezone=tz_str)
+    return dt.timestamp
+
+
+def _build_column_expr(
+    joined: Any,
+    col: str,
+    left_table_columns: list[str],
+    joined_columns: list[str],
+) -> Any:
+    """Build a column expression, handling name conflicts from join."""
+    if col in left_table_columns and f"{col}_right" in joined_columns:
+        return joined[f"{col}_right"].name(col)
+    return joined[col]
+
+
 def _apply_mapping(
     mapping_table_name: str,
     from_schema: TableSchema,
@@ -210,8 +271,9 @@ def _apply_mapping(
     scratch_dir: Optional[Path] = None,
     output_file: Optional[Path] = None,
 ) -> None:
-    """Apply mapping to create result as a table according to_schema
-    - Columns used to join the from_table are prefixed with "from_" in the mapping table
+    """Apply mapping to create result as a table according to_schema.
+
+    Columns used to join the from_table are prefixed with "from_" in the mapping table.
     """
     left_table = backend.table(from_schema.name)
     right_table = backend.table(mapping_table_name)
@@ -222,7 +284,7 @@ def _apply_mapping(
         set(from_schema.list_columns())
     )
 
-    val_col = to_schema.value_column  # from left_table
+    val_col = to_schema.value_column
     final_cols = set(to_schema.list_columns()).union(left_table_pass_thru_columns)
     right_cols = set(right_table_columns).intersection(final_cols)
     left_cols = final_cols - right_cols - {val_col}
@@ -234,121 +296,129 @@ def _apply_mapping(
         set(left_table_columns)
     ), f"Keys {keys} not in table={from_schema.name}"
 
-    # Build join predicates - handle type mismatches (e.g., SQLite datetime as unknown)
-    left_schema = left_table.schema()
-    right_schema = right_table.schema()
-    predicates = []
-    for k in keys:
-        left_col = left_table[k]
-        right_col = right_table[f"from_{k}"]
-
-        # Check for type mismatch and handle appropriately
-        left_type = left_schema.get(k)
-        right_type = right_schema.get(f"from_{k}")
-
-        try:
-            if left_type is not None and right_type is not None:
-                left_is_unknown = not hasattr(left_type, "is_timestamp") or str(
-                    left_type
-                ).startswith("unknown")
-                right_is_timestamp = (
-                    hasattr(right_type, "is_timestamp") and right_type.is_timestamp()
-                )
-                left_is_timestamp = (
-                    hasattr(left_type, "is_timestamp") and left_type.is_timestamp()
-                )
-                right_is_string = (
-                    hasattr(right_type, "is_string") and right_type.is_string()
-                )
-                left_is_string = (
-                    hasattr(left_type, "is_string") and left_type.is_string()
-                )
-
-                if left_is_unknown and right_is_timestamp:
-                    # Cast SQLite datetime string to timestamp
-                    left_col = left_col.cast("timestamp")
-                elif left_is_timestamp and right_is_string:
-                    # Cast Spark string timestamp (from mapping) to timestamp
-                    right_col = right_col.cast("timestamp")
-                elif left_is_string and right_is_timestamp:
-                    left_col = left_col.cast("timestamp")
-
-            pred = left_col == right_col
-            predicates.append(pred)
-        except Exception:
-            # Fallback: cast both to string
-            predicates.append(left_col.cast("string") == right_col.cast("string"))
-
-    # Perform join
+    predicates = _build_join_predicates(left_table, right_table, keys)
     joined = left_table.join(right_table, predicates)
-
-    # Get actual joined column names (Ibis suffixes duplicate names with _right)
     joined_columns = list(joined.columns)
 
     # Build select columns
-    select_cols: list[Any] = []
-
-    # Left table columns (excluding value col for now)
-    for col in left_cols:
-        select_cols.append(joined[col])
-
-    # Right table columns - use _right suffix if there's a name conflict
-    for col in right_cols:
-        if col in left_table_columns and f"{col}_right" in joined_columns:
-            col_expr = joined[f"{col}_right"].name(col)
-        else:
-            col_expr = joined[col]
-
-        # Ensure time column is cast to timestamp if needed (e.g. if source was stringified)
-        if (
-            col == to_schema.time_config.time_column
-            and hasattr(to_schema.time_config, "dtype")
-            and to_schema.time_config.dtype.is_timestamp()
-        ):
-            time_config = to_schema.time_config
-            if time_config.dtype == TimeDataType.TIMESTAMP_TZ:
-                tz_obj = time_config.start.tzinfo if hasattr(time_config, "start") else None
-                if backend.name == "sqlite":
-                    tz_str = "UTC"
-                elif hasattr(tz_obj, "key"):
-                    tz_str = tz_obj.key
-                elif tz_obj:
-                    tz_str = str(tz_obj)
-                else:
-                    tz_str = "UTC"
-                target_dtype = dt.Timestamp(timezone=tz_str)
-            else:
-                target_dtype = dt.timestamp
-            
-            col_expr = col_expr.cast(target_dtype).name(col)
-
-        select_cols.append(col_expr)
+    select_cols = _build_select_columns(
+        joined, left_cols, right_cols, left_table_columns, joined_columns, to_schema, backend.name
+    )
 
     # Handle value column with optional factor multiplication
     tval_col = joined[val_col]
     if "factor" in right_table_columns:
         tval_col = tval_col * joined["factor"]
 
+    query = _build_query(
+        joined,
+        select_cols,
+        tval_col,
+        val_col,
+        left_cols,
+        right_cols,
+        left_table_columns,
+        joined_columns,
+        resampling_operation,
+    )
+
+    _write_result(query, to_schema.name, backend, scratch_dir, output_file)
+
+
+def _build_join_predicates(left_table: Any, right_table: Any, keys: list[str]) -> list[Any]:
+    """Build join predicates with type mismatch handling."""
+    left_schema = left_table.schema()
+    right_schema = right_table.schema()
+    predicates = []
+
+    for k in keys:
+        left_type = left_schema.get(k)
+        right_type = right_schema.get(f"from_{k}")
+        try:
+            pred = _build_join_predicate(left_table, right_table, k, left_type, right_type)
+            predicates.append(pred)
+        except Exception:
+            # Fallback: cast both to string
+            predicates.append(
+                left_table[k].cast("string") == right_table[f"from_{k}"].cast("string")
+            )
+
+    return predicates
+
+
+def _build_select_columns(
+    joined: Any,
+    left_cols: set[str],
+    right_cols: set[str],
+    left_table_columns: list[str],
+    joined_columns: list[str],
+    to_schema: TableSchema,
+    backend_name: str,
+) -> list[Any]:
+    """Build the list of columns to select from the joined table."""
+    select_cols: list[Any] = []
+
+    # Left table columns
+    for col in left_cols:
+        select_cols.append(joined[col])
+
+    # Right table columns with potential name conflict handling
+    time_column = to_schema.time_config.time_column
+    needs_timestamp_cast = (
+        hasattr(to_schema.time_config, "dtype") and to_schema.time_config.dtype.is_timestamp()
+    )
+
+    for col in right_cols:
+        col_expr = _build_column_expr(joined, col, left_table_columns, joined_columns)
+
+        if col == time_column and needs_timestamp_cast:
+            target_dtype = _get_timestamp_target_dtype(to_schema, backend_name)
+            col_expr = col_expr.cast(target_dtype).name(col)
+
+        select_cols.append(col_expr)
+
+    return select_cols
+
+
+def _build_query(
+    joined: Any,
+    select_cols: list[Any],
+    tval_col: Any,
+    val_col: str,
+    left_cols: set[str],
+    right_cols: set[str],
+    left_table_columns: list[str],
+    joined_columns: list[str],
+    resampling_operation: Optional[ResamplingOperationType],
+) -> Any:
+    """Build the final query with optional aggregation."""
     if not resampling_operation:
         select_cols.append(tval_col.name(val_col))
-        query = joined.select(select_cols)
-    else:
-        # Aggregation case - handle column name conflicts like in select
-        groupby_cols = [joined[col] for col in left_cols]
-        for col in right_cols:
-            if col in left_table_columns and f"{col}_right" in joined_columns:
-                groupby_cols.append(joined[f"{col}_right"].name(col))
-            else:
-                groupby_cols.append(joined[col])
-        match resampling_operation:
-            case AggregationType.SUM:
-                agg_col = tval_col.sum().name(val_col)
-            case _:
-                msg = f"Unsupported {resampling_operation=}"
-                raise InvalidOperation(msg)
+        return joined.select(select_cols)
 
-        query = joined.group_by(groupby_cols).aggregate(agg_col)
+    # Aggregation case
+    groupby_cols = [joined[col] for col in left_cols]
+    for col in right_cols:
+        groupby_cols.append(_build_column_expr(joined, col, left_table_columns, joined_columns))
 
+    match resampling_operation:
+        case AggregationType.SUM:
+            agg_col = tval_col.sum().name(val_col)
+        case _:
+            msg = f"Unsupported {resampling_operation=}"
+            raise InvalidOperation(msg)
+
+    return joined.group_by(groupby_cols).aggregate(agg_col)
+
+
+def _write_result(
+    query: Any,
+    table_name: str,
+    backend: IbisBackend,
+    scratch_dir: Optional[Path],
+    output_file: Optional[Path],
+) -> None:
+    """Write the query result to the appropriate destination."""
     if output_file is not None:
         output_file = to_path(output_file)
         write_parquet(backend, query, output_file, overwrite=True)
@@ -356,8 +426,7 @@ def _apply_mapping(
 
     if backend.name == "spark":
         create_materialized_view(
-            str(query.compile()), to_schema.name, backend, scratch_dir=scratch_dir
+            str(query.compile()), table_name, backend, scratch_dir=scratch_dir
         )
     else:
-        # Create table from query
-        backend.create_table(to_schema.name, query)
+        backend.create_table(table_name, query)
