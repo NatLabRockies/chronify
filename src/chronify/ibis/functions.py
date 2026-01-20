@@ -46,6 +46,8 @@ def read_table(
 
     if backend.name == "sqlite" and isinstance(config, DatetimeRangeBase):
         _convert_database_output_for_datetime(df, config)
+    elif backend.name == "spark" and isinstance(config, DatetimeRangeBase):
+        _convert_spark_output_for_datetime(df, config)
 
     return df
 
@@ -231,19 +233,29 @@ def _convert_spark_output_for_datetime(df: pd.DataFrame, config: DatetimeRangeBa
     if config.time_column not in df.columns:
         return
 
+    # Ensure column is datetime (handle strings returned by Spark)
+    if not pd.api.types.is_datetime64_any_dtype(df[config.time_column]):
+        # Parse strings to datetime. Use utc=True to safely handle potential mixed offsets
+        # or explicit UTC strings. This results in a UTC-aware datetime series.
+        df[config.time_column] = pd.to_datetime(df[config.time_column], utc=True)
+
     if config.dtype == TimeDataType.TIMESTAMP_TZ:
-        # For tz-aware configs, Spark returns UTC timestamps
-        # Convert from UTC to the expected timezone
+        # For tz-aware configs, ensure we have tz-aware timestamps.
+        # Spark timestamps are UTC.
+        if not isinstance(df[config.time_column].dtype, DatetimeTZDtype):
+            # tz-naive (default from Spark), localize to UTC
+            df[config.time_column] = df[config.time_column].dt.tz_localize("UTC")
+
+        # Convert to target_tz if specified
         target_tz = config.start.tzinfo
         if target_tz is not None:
-            if isinstance(df[config.time_column].dtype, DatetimeTZDtype):
-                # Already tz-aware, convert to target timezone
-                df[config.time_column] = df[config.time_column].dt.tz_convert(target_tz)
-            else:
-                # tz-naive, localize to UTC then convert
-                df[config.time_column] = (
-                    df[config.time_column].dt.tz_localize("UTC").dt.tz_convert(target_tz)
-                )
+            df[config.time_column] = df[config.time_column].dt.tz_convert(target_tz)
+    else:  # TIMESTAMP_NTZ
+        # For tz-naive configs, ensure the column is tz-naive.
+        # If we just parsed with utc=True, we have UTC-aware datetimes.
+        # We need to strip the timezone using tz_convert(None) for tz-aware timestamps.
+        if isinstance(df[config.time_column].dtype, DatetimeTZDtype):
+            df[config.time_column] = df[config.time_column].dt.tz_convert(None)
 
 
 def _write_to_duckdb(
@@ -315,22 +327,7 @@ def _write_to_pyspark(
     if isinstance(df, pa.Table):
         df = df.to_pandas()
 
-    # Convert datetime columns for Spark compatibility
-    df2 = df.copy()
-    for config in configs:
-        if isinstance(config, DatetimeRangeBase):
-            if isinstance(df2[config.time_column].dtype, DatetimeTZDtype):
-                # Spark doesn't like ns precision
-                new_dtype = df2[config.time_column].dtype.name.replace(
-                    "datetime64[ns", "datetime64[us"
-                )
-                df2[config.time_column] = df2[config.time_column].astype(new_dtype)  # type: ignore
-            elif isinstance(df2[config.time_column].dtype, DateTime64DType):
-                df2[config.time_column] = df2[config.time_column].astype("datetime64[us]")  # type: ignore
-            else:
-                df2[config.time_column] = pd.to_datetime(
-                    df2[config.time_column], utc=False, errors="raise"
-                ).astype("datetime64[us]")  # type: ignore
+    # datetime conversion is handled in backend.create_temp_view -> _prepare_data_for_spark
 
     match if_exists:
         case "append":
@@ -338,9 +335,9 @@ def _write_to_pyspark(
             raise InvalidOperation(msg)
         case "replace":
             backend.drop_view(table_name, if_exists=True)
-            backend.create_temp_view(table_name, df2)
+            backend.create_temp_view(table_name, df)
         case "fail":
-            backend.create_temp_view(table_name, df2)
+            backend.create_temp_view(table_name, df)
         case _:
             msg = f"Invalid if_exists value: {if_exists}"
             raise InvalidOperation(msg)

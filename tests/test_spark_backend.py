@@ -1,6 +1,5 @@
 """Tests for the Spark backend."""
 
-import os
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -9,12 +8,6 @@ import pytest
 
 from chronify import DatetimeRange, Store, TableSchema
 from chronify.exceptions import InvalidTable
-
-
-pytestmark = pytest.mark.skipif(
-    os.getenv("CHRONIFY_SPARK_TEST") is None,
-    reason="Spark tests require CHRONIFY_SPARK_TEST environment variable",
-)
 
 
 @pytest.fixture

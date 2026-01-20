@@ -2,9 +2,11 @@ import os
 from typing import Any, Generator
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+
 import numpy as np
 import pandas as pd
 import pytest
+from pyspark.sql import SparkSession
 
 from chronify.ibis.backend import IbisBackend, make_backend
 from chronify.models import TableSchema
@@ -13,13 +15,7 @@ from chronify.time import RepresentativePeriodFormat
 from chronify.time_configs import RepresentativePeriodTimeNTZ, RepresentativePeriodTimeTZ
 
 
-BACKENDS: dict[str, dict[str, Any]] = {
-    "duckdb": {"backend_name": "duckdb"},
-    "sqlite": {"backend_name": "sqlite"},
-}
-SPARK_AVAILABLE = os.getenv("CHRONIFY_SPARK_TEST")
-if SPARK_AVAILABLE is not None:
-    BACKENDS["spark"] = {"backend_name": "spark"}
+BACKENDS = ("duckdb", "sqlite", "spark")
 
 
 @pytest.fixture
@@ -28,31 +24,29 @@ def create_duckdb_backend() -> IbisBackend:
     return make_backend("duckdb")
 
 
-@pytest.fixture(params=[x for x in BACKENDS.keys() if x != "spark"])
+@pytest.fixture(params=[x for x in BACKENDS if x != "spark"])
 def iter_backends(request) -> Generator[IbisBackend, None, None]:
     """Return an iterable of Ibis backends to test."""
-    backend_config = BACKENDS[request.param]
-    yield make_backend(backend_config["backend_name"])
+    yield make_backend(request.param)
 
 
-@pytest.fixture(params=[x for x in BACKENDS.keys() if x != "spark"])
+@pytest.fixture(params=[x for x in BACKENDS if x != "spark"])
 def iter_stores_by_backend(request) -> Generator[Store, None, None]:
     """Return an iterable of stores with different backends to test.
     Will only return backends that support data ingestion.
     """
-    backend_config = BACKENDS[request.param]
-    store = Store(backend_name=backend_config["backend_name"])
+    backend = request.param
+    store = Store(backend_name=backend)
     yield store
     store.dispose()
 
 
-@pytest.fixture(params=BACKENDS.keys())
+@pytest.fixture(params=BACKENDS)
 def iter_stores_by_backend_no_data_ingestion(request, tmp_path) -> Generator[Store, None, None]:
     """Return an iterable of stores with different backends to test."""
-    backend_config = BACKENDS[request.param]
-    if backend_config["backend_name"] == "spark":
-        from pyspark.sql import SparkSession
-
+    backend = request.param
+    orig_tables_and_views: set[str] | None = set()
+    if backend == "spark":
         # Use a temp directory for the spark warehouse to avoid conflicts
         warehouse_dir = tmp_path / "spark-warehouse"
         spark = (
@@ -61,14 +55,13 @@ def iter_stores_by_backend_no_data_ingestion(request, tmp_path) -> Generator[Sto
             .getOrCreate()
         )
         store = Store.create_new_spark_store(session=spark)
-        orig_tables_and_views: set[str] | None = set()
         for name in store._backend.list_tables():
             orig_tables_and_views.add(name)
     else:
-        store = Store(backend_name=backend_config["backend_name"])
+        store = Store(backend_name=backend)
         orig_tables_and_views = None
     yield store
-    if backend_config["backend_name"] == "spark" and orig_tables_and_views is not None:
+    if backend == "spark" and orig_tables_and_views is not None:
         # Cleanup views and tables created during test
         for name in store._backend.list_tables():
             if name not in orig_tables_and_views:
@@ -82,15 +75,15 @@ def iter_stores_by_backend_no_data_ingestion(request, tmp_path) -> Generator[Sto
                     pass
 
 
-@pytest.fixture(params=[x for x in BACKENDS.keys() if x != "spark"])
+@pytest.fixture(params=[x for x in BACKENDS if x != "spark"])
 def iter_backends_file(request, tmp_path) -> Generator[IbisBackend, None, None]:
     """Return an iterable of Ibis file-based backends to test."""
-    backend_config = BACKENDS[request.param]
+    backend = request.param
     file_path = tmp_path / "store.db"
-    yield make_backend(backend_config["backend_name"], file_path=file_path)
+    yield make_backend(backend, file_path=file_path)
 
 
-@pytest.fixture(params=[x for x in BACKENDS.keys() if x != "spark"])
+@pytest.fixture(params=[x for x in BACKENDS if x != "spark"])
 def iter_backend_names(request) -> Generator[str, None, None]:
     """Return an iterable of backend names."""
     yield request.param

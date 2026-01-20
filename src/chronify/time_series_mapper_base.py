@@ -2,6 +2,7 @@ import abc
 from pathlib import Path
 from typing import Any, Optional
 
+import ibis.expr.datatypes as dt
 import pandas as pd
 from loguru import logger
 
@@ -15,7 +16,12 @@ from chronify.spark_functions import create_materialized_view
 from chronify.models import TableSchema, MappingTableSchema
 from chronify.exceptions import ConflictingInputsError, InvalidOperation
 from chronify.time_series_checker import check_timestamps
-from chronify.time import TimeIntervalType, ResamplingOperationType, AggregationType
+from chronify.time import (
+    TimeIntervalType,
+    ResamplingOperationType,
+    AggregationType,
+    TimeDataType,
+)
 from chronify.time_configs import TimeBasedDataAdjustment
 from chronify.utils.path_utils import to_path
 
@@ -133,6 +139,18 @@ def apply_mapping(
     # Ensure mapping DataFrame column types match source table column types
     df_mapping = _ensure_mapping_types_match_source(df_mapping, from_schema, backend)
 
+    # Debug: Print mapping DF around target time
+    try:
+        debug_ts = pd.Timestamp("2020-11-01 08:00:00", tz="EST")
+        from_cols = [c for c in df_mapping.columns if c.startswith("from_")]
+        if from_cols:
+            debug_row = df_mapping[df_mapping[from_cols[0]] == debug_ts]
+            print(f"DEBUG: Mapping DF row for {debug_ts}:\n{debug_row}")
+        else:
+            print("DEBUG: No from_ columns in mapping DF")
+    except Exception as e:
+        print(f"DEBUG: Error printing mapping DF: {e}")
+
     # Create the mapping table
     write_table(
         backend,
@@ -228,8 +246,6 @@ def _apply_mapping(
         left_type = left_schema.get(k)
         right_type = right_schema.get(f"from_{k}")
 
-        # If one type is unknown (SQLite datetime) and the other is timestamp,
-        # cast the unknown one to timestamp
         try:
             if left_type is not None and right_type is not None:
                 left_is_unknown = not hasattr(left_type, "is_timestamp") or str(
@@ -238,9 +254,23 @@ def _apply_mapping(
                 right_is_timestamp = (
                     hasattr(right_type, "is_timestamp") and right_type.is_timestamp()
                 )
+                left_is_timestamp = (
+                    hasattr(left_type, "is_timestamp") and left_type.is_timestamp()
+                )
+                right_is_string = (
+                    hasattr(right_type, "is_string") and right_type.is_string()
+                )
+                left_is_string = (
+                    hasattr(left_type, "is_string") and left_type.is_string()
+                )
 
                 if left_is_unknown and right_is_timestamp:
                     # Cast SQLite datetime string to timestamp
+                    left_col = left_col.cast("timestamp")
+                elif left_is_timestamp and right_is_string:
+                    # Cast Spark string timestamp (from mapping) to timestamp
+                    right_col = right_col.cast("timestamp")
+                elif left_is_string and right_is_timestamp:
                     left_col = left_col.cast("timestamp")
 
             pred = left_col == right_col
@@ -265,9 +295,34 @@ def _apply_mapping(
     # Right table columns - use _right suffix if there's a name conflict
     for col in right_cols:
         if col in left_table_columns and f"{col}_right" in joined_columns:
-            select_cols.append(joined[f"{col}_right"].name(col))
+            col_expr = joined[f"{col}_right"].name(col)
         else:
-            select_cols.append(joined[col])
+            col_expr = joined[col]
+
+        # Ensure time column is cast to timestamp if needed (e.g. if source was stringified)
+        if (
+            col == to_schema.time_config.time_column
+            and hasattr(to_schema.time_config, "dtype")
+            and to_schema.time_config.dtype.is_timestamp()
+        ):
+            time_config = to_schema.time_config
+            if time_config.dtype == TimeDataType.TIMESTAMP_TZ:
+                tz_obj = time_config.start.tzinfo if hasattr(time_config, "start") else None
+                if backend.name == "sqlite":
+                    tz_str = "UTC"
+                elif hasattr(tz_obj, "key"):
+                    tz_str = tz_obj.key
+                elif tz_obj:
+                    tz_str = str(tz_obj)
+                else:
+                    tz_str = "UTC"
+                target_dtype = dt.Timestamp(timezone=tz_str)
+            else:
+                target_dtype = dt.timestamp
+            
+            col_expr = col_expr.cast(target_dtype).name(col)
+
+        select_cols.append(col_expr)
 
     # Handle value column with optional factor multiplication
     tval_col = joined[val_col]

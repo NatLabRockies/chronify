@@ -32,7 +32,7 @@ jobs:
         python -m pip install ".[dev,spark]"
     - name: Run pytest with coverage
       run: |
-        CHRONIFY_SPARK_TEST=1 pytest -v --cov --cov-report=xml
+        pytest -v --cov --cov-report=xml
     - name: codecov
       uses: codecov/codecov-action@v4.2.0
       if: ${{ matrix.os == env.DEFAULT_OS && matrix.python-version == env.DEFAULT_PYTHON  }}

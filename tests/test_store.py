@@ -23,6 +23,7 @@ from chronify.exceptions import (
     TableNotStored,
 )
 from chronify.ibis.backend import IbisBackend, make_backend
+from chronify.ibis.functions import _convert_spark_output_for_datetime
 from chronify.models import ColumnDType, CsvTableSchema, PivotedTableSchema, TableSchema
 from chronify.store import Store
 from chronify.time import TimeIntervalType, DaylightSavingAdjustmentType
@@ -446,6 +447,23 @@ def test_map_datetime_to_datetime(
     rel = read_csv(GENERATOR_TIME_SERIES_FILE, src_csv_schema)
     rel2 = unpivot(rel, ("gen1", "gen2", "gen3"), "generator", "value")  # noqa: F841
 
+    try:
+        df_debug = rel2.to_df()
+        print("DEBUG: Input DF dtypes:")
+        print(df_debug.dtypes)
+        print("DEBUG: Sample timestamp:")
+        print(df_debug["timestamp"].iloc[0])
+        print(f"DEBUG: Sample timestamp tz: {df_debug['timestamp'].iloc[0].tzinfo}")
+        
+        target = pd.Timestamp("2020-11-01 08:00:00", tz="EST")
+        print(f"DEBUG: Looking for {target}")
+        subset = df_debug[df_debug["timestamp"] == target]
+        print(f"DEBUG: Found {len(subset)} rows.")
+        if not subset.empty:
+            print(subset.head())
+    except Exception as e:
+        print(f"DEBUG: Error printing input DF: {e}")
+
     src_schema = TableSchema(
         name="generators_pb",
         time_config=src_time_config,
@@ -456,6 +474,16 @@ def test_map_datetime_to_datetime(
         out_file = tmp_path / "data.parquet"
         rel2.to_df().to_parquet(out_file)
         store.create_view_from_parquet(out_file, src_schema)
+        
+        # DEBUG: Inspect Spark table
+        try:
+            print("DEBUG: Inspecting generators_pb in Spark")
+            spark = store._backend.con
+            df_spark = spark.sql("SELECT timestamp, CAST(timestamp as LONG) as ts_long FROM generators_pb WHERE timestamp >= '2020-11-01 12:00:00' AND timestamp <= '2020-11-01 14:00:00' ORDER BY timestamp")
+            df_spark.show()
+        except Exception as e:
+            print(f"DEBUG: Error inspecting Spark table: {e}")
+
     else:
         store.ingest_table(rel2, src_schema)
 
@@ -470,6 +498,8 @@ def test_map_datetime_to_datetime(
         df2 = store.read_table(dst_schema.name)
     else:
         df2 = pd.read_parquet(output_file)
+        if store._backend.name == "spark":
+            _convert_spark_output_for_datetime(df2, dst_schema.time_config)
     assert len(df2) == time_array_len * 3
     actual = sorted(df2["timestamp"].unique())
     assert isinstance(src_schema.time_config, DatetimeRange)
@@ -955,6 +985,8 @@ def test_localize_time_zone(
         df2 = store.read_table(dst_schema.name)
     else:
         df2 = pd.read_parquet(output_file)
+        if store._backend.name == "spark":
+            _convert_spark_output_for_datetime(df2, dst_schema.time_config)
     df2["timestamp"] = pd.to_datetime(df2["timestamp"])
     assert len(df2) == time_array_len * 3
     actual = sorted(df2["timestamp"].unique())

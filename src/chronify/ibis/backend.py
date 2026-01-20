@@ -618,6 +618,27 @@ class SparkBackend(IbisBackend):
     def database(self) -> str | None:
         return None
 
+    def _prepare_data_for_spark(self, data: pd.DataFrame | pa.Table) -> pd.DataFrame:
+        """Prepare data for Spark by ensuring consistent timezone handling.
+
+        Converts PyArrow Tables to Pandas DataFrames and converts timestamps to strings
+        to prevent Spark from misinterpreting timezones during DataFrame creation.
+        """
+        if isinstance(data, pa.Table):
+            df = data.to_pandas()
+        else:
+            df = data.copy()
+
+        # Convert timestamps to strings to avoid timezone confusion in Spark
+        # Spark will parse the strings according to session timezone (UTC)
+        # Naive "2020-01-01 12:00:00" -> 12:00:00 UTC
+        # Aware "2020-01-01 12:00:00-05:00" -> 17:00:00 UTC
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                df[col] = df[col].astype(str)
+
+        return df
+
     def create_table(
         self,
         name: str,
@@ -628,11 +649,9 @@ class SparkBackend(IbisBackend):
         if isinstance(data, ir.Table):
             sql = data.compile()
             self._session.sql(f"CREATE TABLE {name} AS {sql}")
-        elif isinstance(data, pa.Table):
-            spark_df = self._session.createDataFrame(data.to_pandas())
-            spark_df.write.saveAsTable(name, mode=mode)
         else:
-            spark_df = self._session.createDataFrame(data)
+            df = self._prepare_data_for_spark(data)
+            spark_df = self._session.createDataFrame(df)
             spark_df.write.saveAsTable(name, mode=mode)
 
         return self.table(name)
@@ -645,16 +664,20 @@ class SparkBackend(IbisBackend):
         if isinstance(data, ir.Table):
             sql = data.compile()
             self._session.sql(f"CREATE OR REPLACE TEMP VIEW {name} AS {sql}")
-        elif isinstance(data, pa.Table):
-            spark_df = self._session.createDataFrame(data.to_pandas())
-            spark_df.createOrReplaceTempView(name)
         else:
-            spark_df = self._session.createDataFrame(data)
+            df = self._prepare_data_for_spark(data)
+            spark_df = self._session.createDataFrame(df)
             spark_df.createOrReplaceTempView(name)
 
     def drop_table(self, name: str, if_exists: bool = False) -> None:
         if_exists_sql = "IF EXISTS " if if_exists else ""
-        self._session.sql(f"DROP TABLE {if_exists_sql}{name}")
+        try:
+            self._session.sql(f"DROP TABLE {if_exists_sql}{name}")
+        except Exception as e:
+            if "is a VIEW" in str(e):
+                self._session.sql(f"DROP VIEW {if_exists_sql}{name}")
+            else:
+                raise
 
     def drop_view(self, name: str, if_exists: bool = False) -> None:
         if_exists_sql = "IF EXISTS " if if_exists else ""
@@ -713,11 +736,9 @@ class SparkBackend(IbisBackend):
         if isinstance(data, ir.Table):
             sql = data.compile()
             self._session.sql(f"INSERT INTO {table_name} {sql}")
-        elif isinstance(data, pa.Table):
-            spark_df = self._session.createDataFrame(data.to_pandas())
-            spark_df.write.insertInto(table_name)
         else:
-            spark_df = self._session.createDataFrame(data)
+            df = self._prepare_data_for_spark(data)
+            spark_df = self._session.createDataFrame(df)
             spark_df.write.insertInto(table_name)
 
     def sql(self, query: str) -> ir.Table:

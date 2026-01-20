@@ -30,6 +30,10 @@ class TimeDataType(StrEnum):
     STRING = "string"
     TIMESTAMP_IN_PARTS = "timestamp_in_parts"
 
+    def is_timestamp(self) -> bool:
+        """Return True if the type is a timestamp type."""
+        return self in (TimeDataType.TIMESTAMP_TZ, TimeDataType.TIMESTAMP_NTZ)
+
 
 class RepresentativePeriodFormat(StrEnum):
     """Defines the supported formats for representative period data."""
