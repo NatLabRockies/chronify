@@ -176,15 +176,16 @@ class TimeZoneLocalizer(TimeZoneLocalizerBase):
 
     @staticmethod
     def _check_from_schema(from_schema: TableSchema) -> None:
-        msg = ""
-        if not isinstance(from_schema.time_config, DatetimeRange):
-            msg += "Source schema does not have DatetimeRange time config. "
         if isinstance(from_schema.time_config, DatetimeRangeWithTZColumn):
-            msg += (
-                "Instead, time config is of type DatetimeRangeWithTZColumn, "
+            msg = (
+                "Source schema time config is of type DatetimeRangeWithTZColumn, "
                 f"try using TimeZoneLocalizerByColumn(). {from_schema.time_config}"
             )
             raise InvalidParameter(msg)
+        if not isinstance(from_schema.time_config, DatetimeRange):
+            msg = f"Source schema does not have DatetimeRange time config.\n{from_schema.time_config}"
+            raise InvalidParameter(msg)
+        msg = ""
         if from_schema.time_config.dtype != TimeDataType.TIMESTAMP_NTZ:
             msg += "Source schema time config dtype must be TIMESTAMP_NTZ. "
         if from_schema.time_config.start_time_is_tz_naive() is False:
@@ -290,6 +291,7 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
             self.time_zone_column = time_zone_column
             self._convert_from_time_config_to_datetime_range_with_tz_column()
         else:
+            assert isinstance(self._from_schema.time_config, DatetimeRangeWithTZColumn)  # mypy
             self.time_zone_column = self._from_schema.time_config.time_zone_column
         self._check_standard_time_zones()
         self._to_schema = self.generate_to_schema()
@@ -301,6 +303,8 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
             msg += (
                 "Source schema must have DatetimeRange or DatetimeRangeWithTZColumn time config. "
             )
+            msg += f"\n{from_schema.time_config}"
+            raise InvalidParameter(msg)
         if from_schema.time_config.dtype != TimeDataType.TIMESTAMP_NTZ:
             msg += "Source schema time config dtype must be TIMESTAMP_NTZ. "
         if msg != "":
@@ -331,7 +335,7 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
         msg = ""
         time_zones = self._from_schema.time_config.time_zones
         for tz in time_zones:
-            if tz == "None":
+            if tz is None:
                 msg += "\nChronify does not support None time zone in time_zone_column. "
                 raise InvalidParameter(msg)
             if not is_standard_time_zone(tz):
@@ -396,6 +400,7 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
 
     def generate_to_schema(self) -> TableSchema:
         id_cols = self._from_schema.time_array_id_columns.copy()
+        assert self.time_zone_column is not None  # Validated in __init__
         if self.time_zone_column not in id_cols:
             id_cols.append(self.time_zone_column)
         to_schema: TableSchema = self._from_schema.model_copy(
@@ -450,6 +455,9 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
 
     def _create_mapping(self) -> tuple[pd.DataFrame, MappingTableSchema]:
         """Create mapping dataframe for localizing tz-naive datetime to column time zones"""
+        assert isinstance(
+            self._from_schema.time_config, DatetimeRangeWithTZColumn
+        )  # Ensured by __init__
         time_col = self._from_schema.time_config.time_column
         from_time_col = "from_" + time_col
         from_time_generator = make_time_range_generator(self._from_schema.time_config)
@@ -471,6 +479,7 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
                 )
                 raise InvalidParameter(msg)
 
+        assert self.time_zone_column is not None  # Validated in __init__
         from_tz_col = "from_" + self.time_zone_column
         from_time_config = self._from_schema.time_config.model_copy(
             update={"time_column": from_time_col}

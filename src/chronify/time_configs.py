@@ -126,6 +126,7 @@ class DatetimeRange(DatetimeRangeBase):
                     f"\n{info.data['start']=}, {dtype=}"
                 )
                 raise InvalidValue(msg)
+        assert dtype is not None  # All valid cases are handled above
         return dtype
 
 

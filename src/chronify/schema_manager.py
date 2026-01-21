@@ -1,5 +1,6 @@
 import json
 
+import ibis.expr.types as ir
 from loguru import logger
 
 from chronify.exceptions import TableNotStored
@@ -42,7 +43,7 @@ class SchemaManager:
             # SQLite uses TEXT
             self._backend.execute_sql(f"CREATE TABLE {self.SCHEMAS_TABLE}(name TEXT, schema TEXT)")
 
-    def _get_schema_table(self):
+    def _get_schema_table(self) -> ir.Table:
         """Get the schemas table as an Ibis table."""
         return self._backend.table(self.SCHEMAS_TABLE)
 

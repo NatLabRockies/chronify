@@ -132,9 +132,10 @@ class TimeZoneConverterBase(abc.ABC):
         self._from_schema = from_schema
 
     def _check_from_schema(self, from_schema: TableSchema) -> None:
-        msg = ""
         if not isinstance(from_schema.time_config, DatetimeRange):
-            msg += "Source schema must have DatetimeRange time config. "
+            msg = "Source schema must have DatetimeRange time config. "
+            raise InvalidParameter(msg)
+        msg = ""
         if from_schema.time_config.dtype != TimeDataType.TIMESTAMP_TZ:
             msg += "Source schema time config dtype must be Timestamp_TZ. "
         if from_schema.time_config.start_time_is_tz_naive():

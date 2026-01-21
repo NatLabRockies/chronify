@@ -1314,9 +1314,11 @@ class Store:
             filter_expr = condition if filter_expr is None else (filter_expr & condition)
 
         # Count rows before deletion
-        count_before = self._backend.execute(table.filter(filter_expr).count())
-        if isinstance(count_before, pd.DataFrame):
-            count_before = count_before.iloc[0, 0]
+        count_result = self._backend.execute(table.filter(filter_expr).count())
+        if isinstance(count_result, pd.DataFrame):
+            count_before = int(count_result.iloc[0, 0])  # type: ignore[arg-type]
+        else:
+            count_before = int(count_result)
 
         # Build and execute DELETE statement
         where_clauses = [
@@ -1325,7 +1327,7 @@ class Store:
         where_str = " AND ".join(where_clauses)
         self._backend.execute_sql(f"DELETE FROM {name} WHERE {where_str}")
 
-        num_deleted = int(count_before)
+        num_deleted = count_before
 
         if num_deleted < 1:
             msg = f"Failed to delete rows: {time_array_id_values=} {num_deleted=}"
@@ -1338,9 +1340,11 @@ class Store:
         )
 
         # Check if table is empty
-        remaining_count = self._backend.execute(table.count())
-        if isinstance(remaining_count, pd.DataFrame):
-            remaining_count = remaining_count.iloc[0, 0]
+        remaining_result = self._backend.execute(table.count())
+        if isinstance(remaining_result, pd.DataFrame):
+            remaining_count = int(remaining_result.iloc[0, 0])  # type: ignore[arg-type]
+        else:
+            remaining_count = int(remaining_result)
         is_empty = remaining_count == 0
 
         if is_empty:

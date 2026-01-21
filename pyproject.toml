@@ -70,6 +70,14 @@ files = [
 ]
 strict = true
 
+[[tool.mypy.overrides]]
+module = [
+  "ibis.*",
+  "pyarrow.*",
+  "pyspark.*",
+]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 pythonpath = "src"
 minversion = "6.0"

@@ -236,11 +236,13 @@ def _build_join_predicate(
 def _get_timestamp_target_dtype(to_schema: TableSchema, backend_name: str) -> Any:
     """Get the target dtype for timestamp column casting."""
     time_config = to_schema.time_config
-    if time_config.dtype == TimeDataType.TIMESTAMP_TZ:
-        tz_obj = time_config.start.tzinfo if hasattr(time_config, "start") else None
+    dtype = getattr(time_config, "dtype", None)
+    if dtype == TimeDataType.TIMESTAMP_TZ:
+        start = getattr(time_config, "start", None)
+        tz_obj = start.tzinfo if start is not None else None
         if backend_name == "sqlite":
             tz_str = "UTC"
-        elif hasattr(tz_obj, "key"):
+        elif tz_obj is not None and hasattr(tz_obj, "key"):
             tz_str = tz_obj.key
         elif tz_obj:
             tz_str = str(tz_obj)
@@ -363,9 +365,11 @@ def _build_select_columns(
         select_cols.append(joined[col])
 
     # Right table columns with potential name conflict handling
-    time_column = to_schema.time_config.time_column
-    needs_timestamp_cast = (
-        hasattr(to_schema.time_config, "dtype") and to_schema.time_config.dtype.is_timestamp()
+    time_column = getattr(to_schema.time_config, "time_column", None)
+    dtype = getattr(to_schema.time_config, "dtype", None)
+    needs_timestamp_cast = dtype is not None and dtype in (
+        TimeDataType.TIMESTAMP_TZ,
+        TimeDataType.TIMESTAMP_NTZ,
     )
 
     for col in right_cols:

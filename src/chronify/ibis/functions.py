@@ -16,8 +16,17 @@ from pandas import DatetimeTZDtype
 from chronify.exceptions import InvalidOperation, InvalidParameter
 from chronify.ibis.backend import IbisBackend
 from chronify.time import TimeDataType
-from chronify.time_configs import DatetimeRangeBase, TimeBaseModel
+from chronify.time_configs import (
+    DatetimeRange,
+    DatetimeRangeBase,
+    DatetimeRanges,
+    DatetimeRangeWithTZColumn,
+    TimeBaseModel,
+)
 from chronify.utils.path_utils import check_overwrite
+
+# Tuple for isinstance checks to enable proper type narrowing
+_DATETIME_RANGES = (DatetimeRange, DatetimeRangeWithTZColumn)
 
 
 def read_table(
@@ -44,9 +53,9 @@ def read_table(
     table = backend.table(table_name)
     df = backend.execute(table)
 
-    if backend.name == "sqlite" and isinstance(config, DatetimeRangeBase):
+    if backend.name == "sqlite" and isinstance(config, _DATETIME_RANGES):
         _convert_database_output_for_datetime(df, config)
-    elif backend.name == "spark" and isinstance(config, DatetimeRangeBase):
+    elif backend.name == "spark" and isinstance(config, _DATETIME_RANGES):
         _convert_spark_output_for_datetime(df, config)
 
     return df
@@ -75,9 +84,9 @@ def read_query(
     """
     df = backend.execute(expr)
 
-    if backend.name == "sqlite" and isinstance(config, DatetimeRangeBase):
+    if backend.name == "sqlite" and isinstance(config, _DATETIME_RANGES):
         _convert_database_output_for_datetime(df, config)
-    elif backend.name == "spark" and isinstance(config, DatetimeRangeBase):
+    elif backend.name == "spark" and isinstance(config, _DATETIME_RANGES):
         _convert_spark_output_for_datetime(df, config)
 
     return df
@@ -188,7 +197,7 @@ def _check_one_config_per_datetime_column(configs: Sequence[TimeBaseModel]) -> N
 
 
 def _convert_database_input_for_datetime(
-    df: pd.DataFrame, config: DatetimeRangeBase, copied: bool
+    df: pd.DataFrame, config: DatetimeRanges, copied: bool
 ) -> tuple[pd.DataFrame, bool]:
     """Convert DataFrame datetime columns for SQLite input."""
     if config.dtype == TimeDataType.TIMESTAMP_NTZ:
@@ -208,7 +217,7 @@ def _convert_database_input_for_datetime(
     return df2, copied
 
 
-def _convert_database_output_for_datetime(df: pd.DataFrame, config: DatetimeRangeBase) -> None:
+def _convert_database_output_for_datetime(df: pd.DataFrame, config: DatetimeRanges) -> None:
     """Convert DataFrame datetime columns after SQLite output."""
     if config.time_column in df.columns:
         if config.dtype == TimeDataType.TIMESTAMP_TZ:
@@ -224,7 +233,7 @@ def _convert_database_output_for_datetime(df: pd.DataFrame, config: DatetimeRang
                 df[config.time_column] = pd.to_datetime(df[config.time_column], utc=False)
 
 
-def _convert_spark_output_for_datetime(df: pd.DataFrame, config: DatetimeRangeBase) -> None:
+def _convert_spark_output_for_datetime(df: pd.DataFrame, config: DatetimeRanges) -> None:
     """Convert DataFrame datetime columns after Spark output.
 
     Spark stores timestamps in UTC (as configured in SparkBackend).
@@ -294,7 +303,7 @@ def _write_to_sqlite(
 
     copied = False
     for config in configs:
-        if isinstance(config, DatetimeRangeBase):
+        if isinstance(config, _DATETIME_RANGES):
             df, copied = _convert_database_input_for_datetime(df, config, copied)
 
     match if_exists:

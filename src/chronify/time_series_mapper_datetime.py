@@ -102,17 +102,12 @@ class MapperDatetimeToDatetime(TimeSeriesMapperBase):
                 # get standard time zone of to_tz
                 to_tz_std = get_standard_time_zone(to_tz)
                 # tz-naive time does not have skips/dups, so always localize in std tz first
-                # mypy complains with error: "Properties" has no attribute "tz_localize"
-                # but the type is pandas.core.indexes.accessors.DatetimeProperties and the
-                # attribute exists.
-                ser_from = ser_from.dt.tz_localize(to_tz_std).dt.tz_convert(to_tz)  # type: ignore
-                pass
+                ser_from = ser_from.dt.tz_localize(to_tz_std).dt.tz_convert(to_tz)
             case (False, True):
                 # get standard time zone of fm_tz
                 fm_tz_std = get_standard_time_zone(fm_tz)
                 # convert to standard time zone of fm_tz before making it tz-naive
-                ser_from = ser_from.dt.tz_convert(fm_tz_std).dt.tz_localize(to_tz)  # type: ignore
-                pass
+                ser_from = ser_from.dt.tz_convert(fm_tz_std).dt.tz_localize(to_tz)
         match (self._adjust_interval, self._wrap_time_allowed):
             case (True, _):
                 ser = pd.Series(

@@ -1,16 +1,16 @@
 """Functions related to time"""
 
 import logging
-from numpy.typing import NDArray
-import numpy as np
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone, tzinfo
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-import pandas as pd
 
-from chronify.time import (
-    TimeIntervalType,
-)
+import numpy as np
+import pandas as pd
+from numpy.typing import NDArray
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
 from chronify.exceptions import InvalidParameter
+from chronify.time import TimeIntervalType
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ def adjust_timestamp_by_dst_offset(timestamp: datetime, resolution: timedelta) -
 
 
 def shifted_interval_timestamps(
-    ts_list: list[datetime],
+    ts_list: Sequence[datetime],
     from_interval_type: TimeIntervalType,
     to_interval_type: TimeIntervalType,
 ) -> list[datetime]:
@@ -73,8 +73,8 @@ def shifted_interval_timestamps(
 
 
 def wrapped_time_timestamps(
-    ts_list: list[datetime],
-    to_timestamps: list[datetime],
+    ts_list: Sequence[datetime],
+    to_timestamps: Sequence[datetime],
 ) -> list[datetime]:
     """Returns the replacement timestamps in order to wrap the ts_list into the to_timestamps range.
 
@@ -108,10 +108,10 @@ def wrapped_time_timestamps(
 
 
 def rolled_interval_timestamps(
-    ts_list: list[datetime],
+    ts_list: Sequence[datetime],
     from_interval_type: TimeIntervalType,
     to_interval_type: TimeIntervalType,
-    to_timestamps: list[datetime],
+    to_timestamps: Sequence[datetime],
 ) -> list[datetime]:
     """Roll ts_list by shifting time interval based on interval type and then
     wrapping timestamps according to to_timestamps.
