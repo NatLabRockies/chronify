@@ -4,7 +4,7 @@ scripts for UNIX operating systems (not Windows).
 
 ## Install chronify with Spark support
 ```
-$ pip install chronify --group=pyhive
+$ pip install "chronify[spark]"
 ```
 
 ## Installation on a development computer
