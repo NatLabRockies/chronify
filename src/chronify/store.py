@@ -1155,6 +1155,11 @@ class Store:
         TableAlreadyExists
             Raised if the dst_schema name already exists.
 
+        Returns
+        -------
+        TableSchema
+            The schema of the newly created table.
+
         Examples
         --------
         >>> store = Store()
@@ -1239,6 +1244,11 @@ class Store:
         ------
         TableAlreadyExists
             Raised if the dst_schema name already exists.
+
+        Returns
+        -------
+        TableSchema
+            The schema of the newly created table.
 
         Examples
         --------

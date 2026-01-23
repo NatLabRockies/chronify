@@ -20,7 +20,7 @@ from chronify.models import (
     TableSchema,
 )
 from chronify.store import Store
-from chronify.time import RepresentativePeriodFormat
+from chronify.time import RepresentativePeriodFormat, TimeDataType
 from chronify.time_configs import (
     AnnualTimeRange,
     DatetimeRange,
@@ -57,6 +57,7 @@ __all__ = (
     "TableSchema",
     "TimeBaseModel",
     "TimeBasedDataAdjustment",
+    "TimeDataType",
 )
 
 __version__ = metadata.metadata("chronify")["Version"]
