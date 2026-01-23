@@ -78,7 +78,7 @@ class DatetimeRangeGeneratorBase(TimeRangeGeneratorBase):
 
     def list_distinct_timestamps_from_dataframe(self, df: pd.DataFrame) -> list[datetime]:
         result = sorted(df[self._model.time_column].unique())
-        if not isinstance(result[0], datetime):
+        if len(result) > 0 and not isinstance(result[0], datetime):
             result = [pd.Timestamp(x) for x in result]
         return result
 
@@ -176,7 +176,5 @@ class DatetimeRangeGeneratorExternalTimeZone(DatetimeRangeGeneratorBase):
         dct = {}
         for tz_name in sorted(df2[tz_col].unique()):
             timestamps = sorted(df2.loc[df2[tz_col] == tz_name, t_col].tolist())
-            # if timestamps[0].tzinfo:
-            #     timestamps = [x.astimezone(tz_name).replace(tzinfo=None) for x in timestamps]
             dct[tz_name] = timestamps
         return dct
