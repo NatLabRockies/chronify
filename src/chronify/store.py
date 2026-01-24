@@ -1218,7 +1218,7 @@ class Store:
     def localize_time_zone_by_column(
         self,
         src_name: str,
-        time_zone_column: str,
+        time_zone_column: Optional[str] = None,
         scratch_dir: Optional[Path] = None,
         output_file: Optional[Path] = None,
         check_mapped_timestamps: bool = False,
@@ -1231,7 +1231,7 @@ class Store:
         src_name
             Refers to the table name of the source data.
         time_zone_column
-            Name of the time zone column for localization.
+            Name of the time zone column for localization, default to None
         scratch_dir
             Directory to use for temporary writes. Default to the system's tmp filesystem.
         output_file
