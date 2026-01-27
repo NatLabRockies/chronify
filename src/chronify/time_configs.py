@@ -113,7 +113,7 @@ class DatetimeRange(DatetimeRangeBase):
                 dtype = TimeDataType.TIMESTAMP_NTZ
             case (False, None):
                 dtype = TimeDataType.TIMESTAMP_TZ
-            # validate dype if provided
+            # validate dtype if provided
             case (True, TimeDataType.TIMESTAMP_TZ):
                 msg = (
                     "DatetimeRange with tz-naive start time must have dtype TIMESTAMP_NTZ: "

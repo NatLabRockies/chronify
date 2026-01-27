@@ -6,6 +6,7 @@ from typing import Optional
 from pathlib import Path
 import pandas as pd
 from pandas import DatetimeTZDtype
+from yaml import warnings
 
 from chronify.models import TableSchema, MappingTableSchema
 from chronify.time_configs import (
@@ -337,16 +338,13 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
             and time_zone_column is not None
         ):
             msg = f"Input {time_zone_column=} will be ignored. time_zone_column is already defined in the time_config."
-            raise Warning(msg)
+            warnings.warn(msg)
 
         msg = ""
         if isinstance(from_schema.time_config, DatetimeRange) and time_zone_column is None:
             msg += "time_zone_column must be provided when source schema time config is of type DatetimeRange. "
-        # if time_zone_column not in from_schema.time_array_id_columns:
-        #     msg = f"{time_zone_column=} must be in source schema time_array_id_columns."
-        if msg != "":
             msg += f"\n{from_schema}"
-            raise InvalidParameter(msg)
+            raise MissingValue(msg)
 
     def _check_standard_time_zones(self) -> None:
         """Check that all time zones in the time_zone_column are valid standard time zones."""

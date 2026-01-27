@@ -22,7 +22,7 @@ from chronify.datetime_range_generator import (
     DatetimeRangeGenerator,
     DatetimeRangeGeneratorExternalTimeZone,
 )
-from chronify.exceptions import InvalidParameter
+from chronify.exceptions import InvalidParameter, MissingValue
 
 
 def generate_datetime_dataframe(schema: TableSchema) -> pd.DataFrame:
@@ -327,7 +327,7 @@ def test_time_localizer_by_column_missing_tz_column_error(iter_engines: Engine) 
     """Test that TimeZoneLocalizerByColumn raises error when time_zone_column is missing for DatetimeRange"""
     from_schema = get_datetime_schema(2018, None, TimeIntervalType.PERIOD_BEGINNING, "base_table")
     df = generate_datetime_dataframe(from_schema)
-    error = (InvalidParameter, "time_zone_column must be provided")
+    error = (MissingValue, "time_zone_column must be provided")
     run_localization_by_column_with_error(iter_engines, df, from_schema, error)
 
 
@@ -360,7 +360,7 @@ def test_localize_time_zone_by_column_missing_tz_column_error(iter_engines: Engi
     from_schema = get_datetime_schema(2018, None, TimeIntervalType.PERIOD_BEGINNING, "base_table")
     df = generate_datetime_dataframe(from_schema)
     error = (
-        Exception,
+        MissingValue,
         "time_zone_column must be provided when source schema time config is of type DatetimeRange",
     )
     run_localization_by_column_with_error(
