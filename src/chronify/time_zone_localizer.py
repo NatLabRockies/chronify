@@ -1,4 +1,5 @@
 import abc
+import warnings
 from zoneinfo import ZoneInfo
 from datetime import tzinfo
 from sqlalchemy import Engine, MetaData, Table, select
@@ -6,7 +7,6 @@ from typing import Optional
 from pathlib import Path
 import pandas as pd
 from pandas import DatetimeTZDtype
-from yaml import warnings
 
 from chronify.models import TableSchema, MappingTableSchema
 from chronify.time_configs import (

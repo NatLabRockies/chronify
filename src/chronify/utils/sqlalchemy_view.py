@@ -20,7 +20,7 @@ class DropView(DDLElement):
         self.name = name
 
 
-@compiler.compiles(CreateView)  # type: ignore[no-untyped-call,misc]
+@compiler.compiles(CreateView)  # type: ignore[untyped-decorator,no-untyped-call]
 def _create_view(element: Any, compiler: Any, **kw: Any) -> str:
     return "CREATE VIEW %s AS %s" % (
         element.name,
@@ -28,7 +28,7 @@ def _create_view(element: Any, compiler: Any, **kw: Any) -> str:
     )
 
 
-@compiler.compiles(DropView)  # type: ignore[no-untyped-call,misc]
+@compiler.compiles(DropView)  # type: ignore[untyped-decorator,no-untyped-call]
 def _drop_view(element: Any, compiler: Any, **kw: Any) -> str:
     return "DROP VIEW %s" % (element.name)
 
