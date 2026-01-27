@@ -21,7 +21,7 @@ class DropTable(DDLElement):
         self.name = name
 
 
-@compiler.compiles(CreateTable)  # type: ignore[untyped-decorator,no-untyped-call]
+@compiler.compiles(CreateTable)
 def _create_table(element: Any, compiler: Any, **kw: Any) -> str:
     return "CREATE TABLE %s AS %s" % (
         element.name,
@@ -29,7 +29,7 @@ def _create_table(element: Any, compiler: Any, **kw: Any) -> str:
     )
 
 
-@compiler.compiles(DropTable)  # type: ignore[untyped-decorator,no-untyped-call]
+@compiler.compiles(DropTable)
 def _drop_table(element: Any, compiler: Any, **kw: Any) -> str:
     return "DROP TABLE %s" % (element.name)
 
