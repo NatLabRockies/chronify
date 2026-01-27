@@ -117,7 +117,7 @@ class CsvTimeSeriesParser:
 
     @staticmethod
     def _read_data_file(data_file: Path) -> pd.DataFrame:
-        return pd.read_csv(data_file, header=0, dtype=COLUMN_DTYPES)  # type: ignore
+        return pd.read_csv(data_file, header=0, dtype=COLUMN_DTYPES)
 
     def _ingest_data(self, data: pd.DataFrame, table_name: str, year: int, length: int) -> None:
         csv_fmt = CsvTimeSeriesFormats.from_columns(data.columns)

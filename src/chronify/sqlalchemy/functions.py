@@ -17,11 +17,17 @@ from chronify.time import TimeDataType
 from sqlalchemy import Connection, Engine, Selectable, text
 
 from chronify.exceptions import InvalidOperation, InvalidParameter
-from chronify.time_configs import DatetimeRangeBase, TimeBaseModel
+from chronify.time_configs import (
+    DatetimeRangeBase,
+    TimeBaseModel,
+    DatetimeRange,
+    DatetimeRangeWithTZColumn,
+)
 from chronify.utils.path_utils import check_overwrite, delete_if_exists, to_path
 
 # Copied from Pandas/Polars
 DbWriteMode: TypeAlias = Literal["replace", "append", "fail"]
+DatetimeRangeWithDtype: TypeAlias = DatetimeRange | DatetimeRangeWithTZColumn
 
 
 def read_database(
@@ -36,7 +42,7 @@ def read_database(
                 df = conn.execute(query).cursor.fetch_df()  # type: ignore
         case "sqlite":
             df = pd.read_sql(query, conn, params=params)
-            if isinstance(config, DatetimeRangeBase):
+            if isinstance(config, (DatetimeRange, DatetimeRangeWithTZColumn)):
                 _convert_database_output_for_datetime(df, config)
         case "hive":
             df = _read_from_hive(query, conn, config, params)
@@ -82,7 +88,7 @@ def _check_one_config_per_datetime_column(configs: Sequence[TimeBaseModel]) -> N
 
 
 def _convert_database_input_for_datetime(
-    df: pd.DataFrame, config: DatetimeRangeBase, copied: bool
+    df: pd.DataFrame, config: DatetimeRangeWithDtype, copied: bool
 ) -> tuple[pd.DataFrame, bool]:
     if config.dtype == TimeDataType.TIMESTAMP_NTZ:
         return df, copied
@@ -100,7 +106,9 @@ def _convert_database_input_for_datetime(
     return df2, copied
 
 
-def _convert_database_output_for_datetime(df: pd.DataFrame, config: DatetimeRangeBase) -> None:
+def _convert_database_output_for_datetime(
+    df: pd.DataFrame, config: DatetimeRangeWithDtype
+) -> None:
     if config.time_column in df.columns:
         if config.dtype == TimeDataType.TIMESTAMP_TZ:
             if isinstance(df[config.time_column].dtype, ObjectDType):
@@ -192,7 +200,7 @@ def _read_from_hive(
 ) -> pd.DataFrame:
     df = pd.read_sql_query(query, conn, params=params)
     if (
-        isinstance(config, DatetimeRangeBase)
+        isinstance(config, (DatetimeRange, DatetimeRangeWithTZColumn))
         and config.time_column in df.columns
         and config.dtype == TimeDataType.TIMESTAMP_TZ
     ):
@@ -212,7 +220,7 @@ def _write_to_sqlite(
     _check_one_config_per_datetime_column(configs)
     copied = False
     for config in configs:
-        if isinstance(config, DatetimeRangeBase):
+        if isinstance(config, (DatetimeRange, DatetimeRangeWithTZColumn)):
             df, copied = _convert_database_input_for_datetime(df, config, copied)
     df.to_sql(table_name, conn, if_exists=if_table_exists, index=False)
 

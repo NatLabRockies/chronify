@@ -106,7 +106,7 @@ class DatetimeRange(DatetimeRangeBase):
         cls,
         dtype: Optional[Literal[TimeDataType.TIMESTAMP_TZ, TimeDataType.TIMESTAMP_NTZ]],
         info: ValidationInfo,
-    ) -> Literal[TimeDataType.TIMESTAMP_TZ, TimeDataType.TIMESTAMP_NTZ]:
+    ) -> Optional[Literal[TimeDataType.TIMESTAMP_TZ, TimeDataType.TIMESTAMP_NTZ]]:
         match (info.data["start"].tzinfo is None, dtype):
             # assign default dtype if not provided
             case (True, None):

@@ -145,9 +145,15 @@ class TimeZoneConverterBase(abc.ABC):
         msg = ""
         if not isinstance(from_schema.time_config, DatetimeRange):
             msg += "Source schema must have DatetimeRange time config. "
-        if from_schema.time_config.dtype != TimeDataType.TIMESTAMP_TZ:
+        if (
+            isinstance(from_schema.time_config, DatetimeRange)
+            and from_schema.time_config.dtype != TimeDataType.TIMESTAMP_TZ
+        ):
             msg += "Source schema time config dtype must be Timestamp_TZ. "
-        if from_schema.time_config.start_time_is_tz_naive():
+        if (
+            isinstance(from_schema.time_config, DatetimeRange)
+            and from_schema.time_config.start_time_is_tz_naive()
+        ):
             msg += (
                 "Source schema time config start time must be timezone-aware. "
                 "This converter will convert time zones and return timestamps as tz-naive "
