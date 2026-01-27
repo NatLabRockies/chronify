@@ -194,7 +194,7 @@ def _read_from_hive(
     if (
         isinstance(config, DatetimeRangeBase)
         and config.time_column in df.columns
-        and not config.start_time_is_tz_naive()
+        and config.dtype == TimeDataType.TIMESTAMP_TZ
     ):
         # This is tied to the fact that we set the Spark session to UTC.
         # Otherwise, there is confusion with the computer's local time zone.

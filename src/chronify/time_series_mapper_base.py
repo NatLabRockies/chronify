@@ -146,7 +146,8 @@ def apply_mapping(
                         to_schema.name,
                     )
                     if output_file is None:
-                        conn.execute(text(f"DROP TABLE {to_schema.name}"))
+                        table_type = "VIEW" if engine.name == "hive" else "TABLE"
+                        conn.execute(text(f"DROP {table_type} {to_schema.name}"))
                     raise
     finally:
         with engine.begin() as conn:
