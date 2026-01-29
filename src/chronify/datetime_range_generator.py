@@ -1,7 +1,6 @@
 from datetime import datetime, tzinfo
 from typing import Generator, Optional
 from itertools import chain
-from calendar import isleap
 
 import pandas as pd
 
@@ -10,7 +9,7 @@ from chronify.time import (
     TimeDataType,
 )
 from chronify.time_configs import DatetimeRanges, DatetimeRange, DatetimeRangeWithTZColumn
-from chronify.time_utils import get_tzname
+from chronify.time_utils import get_tzname, list_timestamps
 from chronify.time_range_generator_base import TimeRangeGeneratorBase
 from chronify.exceptions import InvalidValue
 
@@ -26,51 +25,11 @@ class DatetimeRangeGeneratorBase(TimeRangeGeneratorBase):
         self._model = model
         self._adjustment = leap_day_adjustment or LeapDayAdjustmentType.NONE
 
-    def _list_timestamps(self, start: Optional[datetime] = None) -> list[datetime]:
-        """Return all timestamps as a list.
-        if start is supplied, override self._model.start
-        """
-        if start is None:
-            start = self._model.start
-
-        timestamps = pd.date_range(
-            start=start,
-            periods=self._model.length,
-            freq=self._model.resolution,
-        ).tolist()
-
-        match self._adjustment:
-            case LeapDayAdjustmentType.DROP_FEB29:
-                timestamps = [
-                    ts
-                    for ts in timestamps
-                    if not (isleap(ts.year) and ts.month == 2 and ts.day == 29)
-                ]
-            case LeapDayAdjustmentType.DROP_DEC31:
-                timestamps = [
-                    ts
-                    for ts in timestamps
-                    if not (isleap(ts.year) and ts.month == 12 and ts.day == 31)
-                ]
-            case LeapDayAdjustmentType.DROP_JAN1:
-                timestamps = [
-                    ts
-                    for ts in timestamps
-                    if not (isleap(ts.year) and ts.month == 1 and ts.day == 1)
-                ]
-            case _:
-                pass
-
-        return timestamps  # type: ignore
-
-    def _iter_timestamps(
-        self, start: Optional[datetime] = None
-    ) -> Generator[datetime, None, None]:
-        """Generator from pd.date_range().
-        Note: Established time library already handles historical changes in time zone conversion to UTC.
-        (e.g. Algeria (Africa/Algiers) changed from UTC+0 to UTC+1 on April 25, 1980)
-        """
-        for ts in self._list_timestamps(start=start):
+    def _iter_timestamps(self) -> Generator[datetime, None, None]:
+        """Generator from pd.date_range()."""
+        for ts in list_timestamps(
+            self._model.start, self._model.length, self._model.resolution, self._adjustment
+        ):
             yield ts
 
     def list_time_columns(self) -> list[str]:
@@ -95,7 +54,9 @@ class DatetimeRangeGenerator(DatetimeRangeGeneratorBase):
         assert isinstance(self._model, DatetimeRange)
 
     def list_timestamps(self) -> list[datetime]:
-        return self._list_timestamps()  # list(self._iter_timestamps())
+        return list_timestamps(
+            self._model.start, self._model.length, self._model.resolution, self._adjustment
+        )
 
 
 class DatetimeRangeGeneratorExternalTimeZone(DatetimeRangeGeneratorBase):
@@ -147,7 +108,7 @@ class DatetimeRangeGeneratorExternalTimeZone(DatetimeRangeGeneratorBase):
             case _:
                 msg = f"Unsupported combination of start_time_is_tz_naive and dtype: {self._model}"
                 raise InvalidValue(msg)
-        return self._list_timestamps(start=start)  # ist(self._iter_timestamps(start=start))
+        return list_timestamps(start, self._model.length, self._model.resolution, self._adjustment)
 
     def list_timestamps(self) -> list[datetime]:
         """return ordered tz-naive timestamps across all time zones in the order of the time zones."""

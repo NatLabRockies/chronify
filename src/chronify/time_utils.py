@@ -1,5 +1,6 @@
 """Functions related to time"""
 
+from calendar import isleap
 import logging
 from numpy.typing import NDArray
 import numpy as np
@@ -8,6 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import pandas as pd
 
 from chronify.time import (
+    LeapDayAdjustmentType,
     TimeIntervalType,
 )
 from chronify.exceptions import InvalidParameter
@@ -184,3 +186,40 @@ def get_tzname(tz: tzinfo | None) -> str:
         return tz.key
     ts = datetime(year=2020, month=1, day=1, tzinfo=tz)
     return tz.tzname(ts)  # type: ignore
+
+
+def list_timestamps(
+    start: datetime, length: int, resolution: timedelta, adjustment: LeapDayAdjustmentType
+) -> list[pd.Timestamp]:
+    """Generate timestamps with adjustment using pd.date_range().
+    Established time library can handle historical changes in time zone conversion to UTC.
+    (e.g. Algeria (Africa/Algiers) changed from UTC+0 to UTC+1 on April 25, 1980)
+    """
+    pd_timestamps = pd.date_range(
+        start=start,
+        periods=length,
+        freq=resolution,
+    )
+
+    match adjustment:
+        case LeapDayAdjustmentType.DROP_FEB29:
+            timestamps = [
+                ts
+                for ts in pd_timestamps
+                if not (isleap(ts.year) and ts.month == 2 and ts.day == 29)
+            ]
+        case LeapDayAdjustmentType.DROP_DEC31:
+            timestamps = [
+                ts
+                for ts in pd_timestamps
+                if not (isleap(ts.year) and ts.month == 12 and ts.day == 31)
+            ]
+        case LeapDayAdjustmentType.DROP_JAN1:
+            timestamps = [
+                ts
+                for ts in pd_timestamps
+                if not (isleap(ts.year) and ts.month == 1 and ts.day == 1)
+            ]
+        case _:
+            timestamps = pd_timestamps.tolist()
+    return timestamps
