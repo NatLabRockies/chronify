@@ -91,7 +91,7 @@ def _run_test(
 
 
 def _get_inputs_for_valid_datetimes_with_tz() -> tuple[pd.DataFrame, ZoneInfo, int, None]:
-    tzinfo = ZoneInfo("EST")
+    tzinfo = ZoneInfo("Etc/GMT+5")
     df = pd.DataFrame(
         {
             "timestamp": [
@@ -170,7 +170,7 @@ def _get_inputs_for_incorrect_datetime_length() -> tuple[pd.DataFrame, ZoneInfo,
 
 
 def _get_inputs_for_mismatched_time_array_lengths() -> tuple[pd.DataFrame, ZoneInfo, int, str]:
-    tzinfo = ZoneInfo("EST")
+    tzinfo = ZoneInfo("Etc/GMT+5")
     df = pd.DataFrame(
         {
             "timestamp": [
@@ -189,7 +189,7 @@ def _get_inputs_for_mismatched_time_array_lengths() -> tuple[pd.DataFrame, ZoneI
 
 
 def _get_inputs_for_incorrect_lengths() -> tuple[pd.DataFrame, ZoneInfo, int, str]:
-    tzinfo = ZoneInfo("EST")
+    tzinfo = ZoneInfo("Etc/GMT+5")
     df = pd.DataFrame(
         {
             "timestamp": [
@@ -210,7 +210,7 @@ def _get_inputs_for_incorrect_lengths() -> tuple[pd.DataFrame, ZoneInfo, int, st
 
 
 def _get_inputs_for_incorrect_time_arrays() -> tuple[pd.DataFrame, ZoneInfo, int, str]:
-    tzinfo = ZoneInfo("EST")
+    tzinfo = ZoneInfo("Etc/GMT+5")
     df = pd.DataFrame(
         {
             "timestamp": [
@@ -231,7 +231,7 @@ def _get_inputs_for_incorrect_time_arrays() -> tuple[pd.DataFrame, ZoneInfo, int
 def _get_inputs_for_incorrect_time_arrays_with_duplicates() -> (
     tuple[pd.DataFrame, ZoneInfo, int, str]
 ):
-    tzinfo = ZoneInfo("EST")
+    tzinfo = ZoneInfo("Etc/GMT+5")
     df = pd.DataFrame(
         {
             "timestamp": [

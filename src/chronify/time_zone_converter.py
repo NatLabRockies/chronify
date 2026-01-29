@@ -24,7 +24,7 @@ from chronify.time import TimeDataType, TimeType
 from chronify.time_utils import wrapped_time_timestamps, get_tzname
 
 
-# TODO - retain original timestamp column
+# TODO - allow option to retain original timestamp column - Issue #64
 def convert_time_zone(
     engine: Engine,
     metadata: MetaData,
@@ -187,8 +187,8 @@ class TimeZoneConverter(TimeZoneConverterBase):
     Output data table will contain tz-naive timestamps with time zone recorded in a column
     Output time config will be of type DatetimeRange with Timestamp_NTZ dtype and tz-naive start time.
 
-    # TODO: support DatetimeRangeWithTZColumn as input time config
-    # TODO: support wrap_time_allowed option
+    # TODO: support DatetimeRangeWithTZColumn as input time config - Issue #64
+    # TODO: support wrap_time_allowed option - Issue #64
     """
 
     def __init__(
@@ -318,9 +318,7 @@ class TimeZoneConverterByColumn(TimeZoneConverterBase):
      Note: converted time is wrapped within the local time range of the original timestamps.
     --------------------------------
 
-    # TODO: support DatetimeRangeWithTZColumn as input time config
-    # TODO: add util func to reduce code duplication with TimeZoneLocalizerByColumn
-    # TODO: add util func to reduce DatetimeRangeWithTZColumn aligned_in_absolute_time to DatetimeRange
+    # TODO: support DatetimeRangeWithTZColumn as input time config - Issue #64
     """
 
     def __init__(

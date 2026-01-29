@@ -494,7 +494,6 @@ class Store:
         columns = set(src_schema.list_columns())
         check_columns(rel.columns, columns)
 
-        # TODO
         if isinstance(src_schema.time_config, IndexTimeRangeBase):
             if isinstance(dst_schema.time_config, DatetimeRange):
                 raise NotImplementedError
@@ -978,7 +977,7 @@ class Store:
         Examples
         --------
         >>> store = Store()
-        >>> start = datetime(year=2018, month=1, day=1, tzinfo=ZoneInfo("EST"))
+        >>> start = datetime(year=2018, month=1, day=1, tzinfo=ZoneInfo("Etc/GMT+5"))
         >>> freq = timedelta(hours=1)
         >>> hours_per_year = 8760
         >>> num_time_arrays = 1
@@ -1067,7 +1066,7 @@ class Store:
         Examples
         --------
         >>> store = Store()
-        >>> start = datetime(year=2018, month=1, day=1, tzinfo=ZoneInfo("EST"))
+        >>> start = datetime(year=2018, month=1, day=1, tzinfo=ZoneInfo("Etc/GMT+5"))
         >>> freq = timedelta(hours=1)
         >>> hours_per_year = 8760
         >>> num_time_arrays = 3
@@ -1190,7 +1189,7 @@ class Store:
         ...     value_column="value",
         ... )
         >>> store.ingest_table(df, schema)
-        >>> to_time_zone = ZoneInfo("EST")
+        >>> to_time_zone = ZoneInfo("Etc/GMT+5")
         >>> dst_schema = store.localize_time_zone(
         ...     schema.name, to_time_zone, check_mapped_timestamps=True
         ... )
@@ -1265,7 +1264,9 @@ class Store:
         ...         "timestamp": np.tile(
         ...             pd.date_range(start, periods=hours_per_year, freq="h"), num_time_arrays
         ...         ),
-        ...         "time_zone": np.repeat(["EST", "CST", "MST"], hours_per_year),
+        ...         "time_zone": np.repeat(
+        ...             ["Etc/GMT+5", "Etc/GMT+6", "Etc/GMT+7"], hours_per_year
+        ...         ),  # EST, CST, MST
         ...         "value": np.random.random(hours_per_year * num_time_arrays),
         ...     }
         ... )

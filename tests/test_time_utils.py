@@ -19,7 +19,7 @@ from chronify.time import TimeIntervalType
 
 def test_adjust_timestamp_by_dst_offset() -> None:
     # DST-aware datetime vs standard time zone
-    tzs = [ZoneInfo("America/New_York"), ZoneInfo("EST")]
+    tzs = [ZoneInfo("America/New_York"), ZoneInfo("Etc/GMT+5")]
     hours = [23, 0]
     for tz, hour in zip(tzs, hours):
         dt = datetime(2020, 7, 1, 0, 0, tzinfo=tz)
@@ -91,34 +91,39 @@ def test_is_standard_time_zone() -> None:
 def test_get_standard_time_zone() -> None:
     tzs = [
         ZoneInfo("America/New_York"),
+        ZoneInfo("US/Eastern"),
         ZoneInfo("EST"),
         timezone(timedelta(hours=-5)),
         None,
     ]
     stzs = [
-        ZoneInfo("EST"),
-        ZoneInfo("EST"),
-        timezone(timedelta(hours=-5)),
+        ZoneInfo("Etc/GMT+5"),
+        ZoneInfo("Etc/GMT+5"),
+        ZoneInfo("Etc/GMT+5"),
+        ZoneInfo("Etc/GMT+5"),
         None,
     ]
     for tz, stz in zip(tzs, stzs):
         std_tz = get_standard_time_zone(tz)
         if tz is None:
             assert std_tz is None
-            continue
-        assert std_tz == stz
+        else:
+            assert is_standard_time_zone(stz) is True
+            assert is_standard_time_zone(std_tz) is True
+            ts = datetime(2020, 6, 1, 0, 0)
+            assert stz.utcoffset(ts) == std_tz.utcoffset(ts)
 
 
 def test_get_tzname() -> None:
     tzs = [
         ZoneInfo("America/New_York"),
-        ZoneInfo("EST"),
+        ZoneInfo("Etc/GMT+5"),
         timezone(timedelta(hours=-5)),
         None,
     ]
     etzs = [
         "America/New_York",
-        "EST",
+        "Etc/GMT+5",
         "UTC-05:00",
         "None",
     ]

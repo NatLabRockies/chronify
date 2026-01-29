@@ -261,7 +261,6 @@ def write_query_to_parquet(
             if not overwrite:
                 msg = "write_table_to_parquet with Hive requires overwrite=True"
                 raise InvalidOperation(msg)
-            # TODO: partition columns
             if partition_columns:
                 msg = "write_table_to_parquet with Hive doesn't support partition_columns"
                 raise InvalidOperation(msg)

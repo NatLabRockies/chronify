@@ -35,7 +35,7 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
         data_adjustment: Optional[TimeBasedDataAdjustment] = None,
         wrap_time_allowed: bool = False,
     ) -> None:
-        # TODO: refactor to use new time configs
+        # TODO: refactor to use new time configs - Issue #64
         super().__init__(
             engine, metadata, from_schema, to_schema, data_adjustment, wrap_time_allowed
         )

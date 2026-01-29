@@ -228,7 +228,7 @@ class TimeZoneLocalizer(TimeZoneLocalizerBase):
         return to_time_zone
 
     def generate_to_time_config(self) -> DatetimeRange:
-        assert isinstance(self._from_schema.time_config, DatetimeRange)  # mypy
+        assert isinstance(self._from_schema.time_config, DatetimeRange)
         to_time_config: DatetimeRange = self._from_schema.time_config.model_copy(
             update={
                 "dtype": TimeDataType.TIMESTAMP_TZ
@@ -310,7 +310,7 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
             self.time_zone_column = time_zone_column
             self._convert_from_time_config_to_datetime_range_with_tz_column()
         else:
-            assert isinstance(self._from_schema.time_config, DatetimeRangeWithTZColumn)  # mypy
+            assert isinstance(self._from_schema.time_config, DatetimeRangeWithTZColumn)
             self.time_zone_column = self._from_schema.time_config.time_zone_column
         self._check_standard_time_zones()
         self._to_schema = self.generate_to_schema()
@@ -348,7 +348,7 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
 
     def _check_standard_time_zones(self) -> None:
         """Check that all time zones in the time_zone_column are valid standard time zones."""
-        assert isinstance(self._from_schema.time_config, DatetimeRangeWithTZColumn)  # mypy
+        assert isinstance(self._from_schema.time_config, DatetimeRangeWithTZColumn)
         msg = ""
         time_zones = self._from_schema.time_config.time_zones
         for tz in time_zones:
@@ -384,7 +384,7 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
         self._from_schema.time_config = DatetimeRangeWithTZColumn(**time_kwargs)
 
     def generate_to_time_config(self) -> DatetimeRangeBase:
-        assert isinstance(self._from_schema.time_config, DatetimeRangeWithTZColumn)  # mypy
+        assert isinstance(self._from_schema.time_config, DatetimeRangeWithTZColumn)
         match self._from_schema.time_config.start_time_is_tz_naive():
             case True:
                 # tz-naive start, aligned_in_local_time of the time zones
@@ -474,18 +474,18 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
 
     def _create_mapping(self) -> tuple[pd.DataFrame, MappingTableSchema]:
         """Create mapping dataframe for localizing tz-naive datetime to column time zones"""
-        assert isinstance(self._from_schema.time_config, DatetimeRangeWithTZColumn)  # mypy
+        assert isinstance(self._from_schema.time_config, DatetimeRangeWithTZColumn)
         time_col = self._from_schema.time_config.time_column
         from_time_col = "from_" + time_col
         from_time_generator = make_time_range_generator(self._from_schema.time_config)
-        assert isinstance(from_time_generator, DatetimeRangeGeneratorExternalTimeZone)  # mypy
+        assert isinstance(from_time_generator, DatetimeRangeGeneratorExternalTimeZone)
         from_time_data_dct = from_time_generator.list_timestamps_by_time_zone()
 
         to_time_generator = make_time_range_generator(self._to_schema.time_config)
         match to_time_generator:
-            case DatetimeRangeGeneratorExternalTimeZone():  # mypy
+            case DatetimeRangeGeneratorExternalTimeZone():
                 to_time_data_dct = to_time_generator.list_timestamps_by_time_zone()
-            case DatetimeRangeGenerator():  # mypy
+            case DatetimeRangeGenerator():
                 to_time_data = to_time_generator.list_timestamps()
                 to_time_data_dct = {tz_name: to_time_data for tz_name in from_time_data_dct.keys()}
             case _:

@@ -51,7 +51,7 @@ GENERATOR_TIME_SERIES_FILE = "tests/data/gen.csv"
 @pytest.fixture
 def generators_schema():
     time_config = DatetimeRange(
-        start=datetime(year=2020, month=1, day=1, tzinfo=ZoneInfo("EST")),
+        start=datetime(year=2020, month=1, day=1, tzinfo=ZoneInfo("Etc/GMT+5")),
         resolution=timedelta(hours=1),
         length=8784,
         interval_type=TimeIntervalType.PERIOD_BEGINNING,
@@ -117,7 +117,7 @@ def test_ingest_csv(iter_stores_by_engine: Store, tmp_path, generators_schema, u
         new_src_file = tmp_path / "gen_tz.csv"
         duckdb.sql(
             f"""
-            SELECT timezone('EST', timestamp) as timestamp, gen1, gen2, gen3
+            SELECT timezone('Etc/GMT+5', timestamp) as timestamp, gen1, gen2, gen3
             FROM read_csv('{src_file}')
         """
         ).to_df().to_csv(new_src_file, index=False)
@@ -318,7 +318,7 @@ def test_load_parquet(iter_stores_by_engine_no_data_ingestion: Store, tmp_path):
         return
 
     time_config = DatetimeRange(
-        start=datetime(year=2020, month=1, day=1, tzinfo=ZoneInfo("EST")),
+        start=datetime(year=2020, month=1, day=1, tzinfo=ZoneInfo("Etc/GMT+5")),
         resolution=timedelta(hours=1),
         length=8784,
         interval_type=TimeIntervalType.PERIOD_BEGINNING,
@@ -435,7 +435,7 @@ def test_map_one_week_per_month_by_hour_to_datetime(
         store.map_table_time_config(src_schema.name, dst_schema, check_mapped_timestamps=True)
 
 
-@pytest.mark.parametrize("tzinfo", [ZoneInfo("EST"), None])
+@pytest.mark.parametrize("tzinfo", [ZoneInfo("Etc/GMT+5"), None])
 def test_map_datetime_to_datetime(
     tmp_path, iter_stores_by_engine_no_data_ingestion: Store, tzinfo
 ):
@@ -536,7 +536,7 @@ def test_map_index_time_to_datetime(
         time_array_id_columns=["generator"],
         value_column="value",
         time_config=DatetimeRange(
-            start=datetime(year=year, month=1, day=1, hour=1, tzinfo=ZoneInfo("EST")),
+            start=datetime(year=year, month=1, day=1, hour=1, tzinfo=ZoneInfo("Etc/GMT+5")),
             resolution=timedelta(hours=1),
             length=time_array_len,
             interval_type=TimeIntervalType.PERIOD_ENDING,
@@ -793,7 +793,7 @@ def test_convert_time_zone(
     store = iter_stores_by_engine_no_data_ingestion
     time_array_len = 8784
     year = 2020
-    tzinfo = ZoneInfo("EST")
+    tzinfo = ZoneInfo("Etc/GMT+5")
 
     src_time_config = DatetimeRange(
         start=datetime(year=year, month=1, day=1, hour=0, tzinfo=tzinfo),
@@ -865,7 +865,7 @@ def test_convert_time_zone_by_column(
     store = iter_stores_by_engine_no_data_ingestion
     time_array_len = 8784
     year = 2020
-    tzinfo = ZoneInfo("EST")
+    tzinfo = ZoneInfo("Etc/GMT+5")
 
     src_time_config = DatetimeRange(
         start=datetime(year=year, month=1, day=1, hour=0, tzinfo=tzinfo),
@@ -941,7 +941,7 @@ def test_convert_time_zone_by_column(
         check_timestamp_lists(actual, expected)
 
 
-@pytest.mark.parametrize("to_time_zone", [ZoneInfo("UTC"), ZoneInfo("EST"), None])
+@pytest.mark.parametrize("to_time_zone", [ZoneInfo("UTC"), ZoneInfo("Etc/GMT+5"), None])
 def test_localize_time_zone(
     tmp_path, iter_stores_by_engine_no_data_ingestion: Store, to_time_zone: tzinfo | None
 ):

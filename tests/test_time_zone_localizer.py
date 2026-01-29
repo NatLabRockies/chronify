@@ -234,7 +234,7 @@ def run_localization_by_column_with_error(
         ).localize_time_zone(check_mapped_timestamps=True)
 
 
-@pytest.mark.parametrize("to_time_zone", [None, ZoneInfo("EST")])
+@pytest.mark.parametrize("to_time_zone", [None, ZoneInfo("Etc/GMT+5")])
 def test_time_localization(iter_engines: Engine, to_time_zone: tzinfo | None) -> None:
     from_schema = get_datetime_schema(2018, None, TimeIntervalType.PERIOD_BEGINNING, "base_table")
     df = generate_datetime_dataframe(from_schema)
