@@ -32,10 +32,10 @@ def adjust_timestamp_by_dst_offset(timestamp: datetime, resolution: timedelta) -
 
 
 def shifted_interval_timestamps(
-    ts_list: list[datetime],
+    ts_list: list[pd.Timestamp],
     from_interval_type: TimeIntervalType,
     to_interval_type: TimeIntervalType,
-) -> list[datetime]:
+) -> list[pd.Timestamp]:
     """Shift ts_list by ONE time interval based on interval type.
 
     Example:
@@ -75,9 +75,9 @@ def shifted_interval_timestamps(
 
 
 def wrapped_time_timestamps(
-    ts_list: list[datetime],
-    to_timestamps: list[datetime],
-) -> list[datetime]:
+    ts_list: list[pd.Timestamp],
+    to_timestamps: list[pd.Timestamp],
+) -> list[pd.Timestamp]:
     """Returns the replacement timestamps in order to wrap the ts_list into the to_timestamps range.
 
     Example:
@@ -105,16 +105,16 @@ def wrapped_time_timestamps(
     upper_cond = arr > tmax
     if upper_cond.sum() > 0:
         arr2.loc[upper_cond] -= tdelta
-    ts_list2 = arr2.tolist()
-    return ts_list2  # type: ignore
+    ts_list2: list[pd.Timestamp] = arr2.tolist()
+    return ts_list2
 
 
 def rolled_interval_timestamps(
-    ts_list: list[datetime],
+    ts_list: list[pd.Timestamp],
     from_interval_type: TimeIntervalType,
     to_interval_type: TimeIntervalType,
-    to_timestamps: list[datetime],
-) -> list[datetime]:
+    to_timestamps: list[pd.Timestamp],
+) -> list[pd.Timestamp]:
     """Roll ts_list by shifting time interval based on interval type and then
     wrapping timestamps according to to_timestamps.
 

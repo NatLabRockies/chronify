@@ -1,6 +1,6 @@
 import abc
 from zoneinfo import ZoneInfo
-from datetime import datetime, tzinfo
+from datetime import tzinfo
 from sqlalchemy import Engine, MetaData, Table, select
 from typing import Optional
 from pathlib import Path
@@ -424,10 +424,10 @@ class TimeZoneConverterByColumn(TimeZoneConverterBase):
 
         df_tz = []
         for tz_name, time_data in to_time_data_dct.items():
-            to_time_data: list[datetime] | list[pd.Timestamp]
+            to_time_data: list[pd.Timestamp]
             if self._wrap_time_allowed:
                 # assume it is being wrapped based on the tz-naive version of the original time data
-                final_time_data = [x.replace(tzinfo=None) for x in from_time_data]
+                final_time_data = [x.tz_localize(None) for x in from_time_data]
                 to_time_data = wrapped_time_timestamps(time_data, final_time_data)
             else:
                 to_time_data = time_data
