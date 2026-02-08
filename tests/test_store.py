@@ -987,6 +987,8 @@ def test_localize_time_zone(
         df2 = store.read_table(dst_schema.name)
     else:
         df2 = pd.read_parquet(output_file)
+        if store._backend.name == "spark":
+            _convert_spark_output_for_datetime(df2, dst_schema.time_config)
     df2["timestamp"] = pd.to_datetime(df2["timestamp"])
     assert len(df2) == time_array_len * 3
     actual = sorted(df2["timestamp"].unique())
