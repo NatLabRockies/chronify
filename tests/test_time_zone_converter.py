@@ -5,9 +5,9 @@ import pytest
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import Engine, MetaData
 
-from chronify.sqlalchemy.functions import read_database, write_database
+from chronify.ibis.backend import IbisBackend
+from chronify.ibis.functions import read_query, write_table
 from chronify.time_zone_converter import (
     TimeZoneConverter,
     TimeZoneConverterByColumn,
@@ -85,40 +85,33 @@ def get_datetime_schema(
 
 
 def ingest_data(
-    engine: Engine,
-    metadata: MetaData,
+    backend: IbisBackend,
     df: pd.DataFrame,
     schema: TableSchema,
 ) -> None:
-    with engine.begin() as conn:
-        write_database(df, conn, schema.name, [schema.time_config], if_table_exists="replace")
-    metadata.reflect(engine, views=True)
+    write_table(backend, df, schema.name, [schema.time_config], if_exists="replace")
 
 
 def get_mapped_dataframe(
-    engine: Engine,
+    backend: IbisBackend,
     table_name: str,
     time_config: DatetimeRange,
 ) -> pd.DataFrame:
-    with engine.connect() as conn:
-        query = f"select * from {table_name}"
-        queried = read_database(query, conn, time_config)
+    table = backend.table(table_name)
+    queried = read_query(backend, table, time_config)
     queried = queried.sort_values(by=["id", "timestamp"]).reset_index(drop=True)
     return queried
 
 
 def run_conversion(
-    engine: Engine,
+    backend: IbisBackend,
     df: pd.DataFrame,
     from_schema: TableSchema,
     to_time_zone: tzinfo | None,
 ) -> None:
-    metadata = MetaData()
-    ingest_data(engine, metadata, df, from_schema)
-    to_schema = convert_time_zone(
-        engine, metadata, from_schema, to_time_zone, check_mapped_timestamps=True
-    )
-    dfo = get_mapped_dataframe(engine, to_schema.name, to_schema.time_config)
+    ingest_data(backend, df, from_schema)
+    to_schema = convert_time_zone(backend, from_schema, to_time_zone, check_mapped_timestamps=True)
+    dfo = get_mapped_dataframe(backend, to_schema.name, to_schema.time_config)
     assert df["value"].equals(dfo["value"])
     if to_time_zone is None:
         expected = df["timestamp"].dt.tz_localize(None)
@@ -128,22 +121,20 @@ def run_conversion(
 
 
 def run_conversion_to_column_time_zones(
-    engine: Engine,
+    backend: IbisBackend,
     df: pd.DataFrame,
     from_schema: TableSchema,
     wrap_time_allowed: bool,
 ) -> None:
-    metadata = MetaData()
-    ingest_data(engine, metadata, df, from_schema)
+    ingest_data(backend, df, from_schema)
     to_schema = convert_time_zone_by_column(
-        engine,
-        metadata,
+        backend,
         from_schema,
         "time_zone",
         wrap_time_allowed=wrap_time_allowed,
         check_mapped_timestamps=True,
     )
-    dfo = get_mapped_dataframe(engine, to_schema.name, to_schema.time_config)
+    dfo = get_mapped_dataframe(backend, to_schema.name, to_schema.time_config)
     dfo = dfo[df.columns].sort_values(by="index").reset_index(drop=True)
     dfo["timestamp"] = pd.to_datetime(dfo["timestamp"])  # needed for engine 2, not sure why
 
@@ -163,46 +154,45 @@ def run_conversion_to_column_time_zones(
 
 
 def run_conversion_with_error(
-    engine: Engine,
+    backend: IbisBackend,
     df: pd.DataFrame,
     from_schema: TableSchema,
     use_tz_col: bool,
     error: tuple[Any, str],
 ) -> None:
-    metadata = MetaData()
-    ingest_data(engine, metadata, df, from_schema)
+    ingest_data(backend, df, from_schema)
     with pytest.raises(error[0], match=error[1]):
         if use_tz_col:
             tzc = TimeZoneConverterByColumn(
-                engine, metadata, from_schema, "time_zone", wrap_time_allowed=False
+                backend, from_schema, "time_zone", wrap_time_allowed=False
             )
             tzc.convert_time_zone(check_mapped_timestamps=True)
         else:
-            tzc2 = TimeZoneConverter(engine, metadata, from_schema, None)
+            tzc2 = TimeZoneConverter(backend, from_schema, None)
             tzc2.convert_time_zone(check_mapped_timestamps=True)
 
 
-def test_src_table_no_time_zone(iter_engines: Engine) -> None:
+def test_src_table_no_time_zone(iter_backends: IbisBackend) -> None:
     from_schema = get_datetime_schema(2018, None, TimeIntervalType.PERIOD_BEGINNING, "base_table")
     df = generate_datetime_dataframe(from_schema)
     error = (InvalidParameter, "Source schema time config start time must be timezone-aware")
-    run_conversion_with_error(iter_engines, df, from_schema, False, error)
+    run_conversion_with_error(iter_backends, df, from_schema, False, error)
 
 
 @pytest.mark.parametrize(
     "to_time_zone", [None, ZoneInfo("US/Central"), ZoneInfo("America/Los_Angeles")]
 )
-def test_time_conversion(iter_engines: Engine, to_time_zone: tzinfo | None) -> None:
+def test_time_conversion(iter_backends: IbisBackend, to_time_zone: tzinfo | None) -> None:
     from_schema = get_datetime_schema(
         2018, ZoneInfo("US/Mountain"), TimeIntervalType.PERIOD_BEGINNING, "base_table"
     )
     df = generate_datetime_dataframe(from_schema)
-    run_conversion(iter_engines, df, from_schema, to_time_zone)
+    run_conversion(iter_backends, df, from_schema, to_time_zone)
 
 
 @pytest.mark.parametrize("wrap_time_allowed", [False, True])
 def test_time_conversion_to_column_time_zones(
-    iter_engines: Engine, wrap_time_allowed: bool
+    iter_backends: IbisBackend, wrap_time_allowed: bool
 ) -> None:
     from_schema = get_datetime_schema(
         2018,
@@ -212,4 +202,4 @@ def test_time_conversion_to_column_time_zones(
         has_tz_col=True,
     )
     df = generate_dataframe_with_tz_col(from_schema)
-    run_conversion_to_column_time_zones(iter_engines, df, from_schema, wrap_time_allowed)
+    run_conversion_to_column_time_zones(iter_backends, df, from_schema, wrap_time_allowed)

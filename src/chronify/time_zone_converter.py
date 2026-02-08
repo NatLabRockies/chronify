@@ -1,11 +1,12 @@
 import abc
 from zoneinfo import ZoneInfo
 from datetime import tzinfo
-from sqlalchemy import Engine, MetaData, Table, select
 from typing import Optional
 from pathlib import Path
 import pandas as pd
 
+from chronify.ibis.backend import IbisBackend
+from chronify.ibis.functions import read_query
 from chronify.models import TableSchema, MappingTableSchema
 from chronify.time_configs import (
     DatetimeRangeBase,
@@ -19,15 +20,13 @@ from chronify.datetime_range_generator import (
 from chronify.exceptions import InvalidParameter, MissingValue
 from chronify.time_series_mapper_base import apply_mapping
 from chronify.time_range_generator_factory import make_time_range_generator
-from chronify.sqlalchemy.functions import read_database
 from chronify.time import TimeDataType, TimeType
 from chronify.time_utils import wrapped_time_timestamps, get_tzname
 
 
 # TODO - allow option to retain original timestamp column - Issue #64
 def convert_time_zone(
-    engine: Engine,
-    metadata: MetaData,
+    backend: IbisBackend,
     src_schema: TableSchema,
     to_time_zone: tzinfo | None,
     scratch_dir: Optional[Path] = None,
@@ -40,10 +39,8 @@ def convert_time_zone(
 
     Parameters
     ----------
-    engine : sqlalchemy.Engine
-        SQLAlchemy engine.
-    metadata : sqlalchemy.MetaData
-        SQLAlchemy metadata.
+    backend : IbisBackend
+        Ibis backend.
     src_schema : TableSchema
         Defines the source table in the database.
     to_time_zone : tzinfo or None
@@ -61,7 +58,7 @@ def convert_time_zone(
     TableSchema
         Schema of output table with converted timestamps.
     """
-    tzc = TimeZoneConverter(engine, metadata, src_schema, to_time_zone)
+    tzc = TimeZoneConverter(backend, src_schema, to_time_zone)
     tzc.convert_time_zone(
         scratch_dir=scratch_dir,
         output_file=output_file,
@@ -72,8 +69,7 @@ def convert_time_zone(
 
 
 def convert_time_zone_by_column(
-    engine: Engine,
-    metadata: MetaData,
+    backend: IbisBackend,
     src_schema: TableSchema,
     time_zone_column: str,
     wrap_time_allowed: Optional[bool] = False,
@@ -86,10 +82,8 @@ def convert_time_zone_by_column(
 
     Parameters
     ----------
-    engine : sqlalchemy.Engine
-        sqlalchemy engine
-    metadata : sqlalchemy.MetaData
-        sqlalchemy metadata
+    backend : IbisBackend
+        Ibis backend
     src_schema : TableSchema
         Defines the source table in the database.
     time_zone_column : str
@@ -116,9 +110,7 @@ def convert_time_zone_by_column(
     dst_schema : TableSchema
         schema of output table with converted timestamps
     """
-    tzc = TimeZoneConverterByColumn(
-        engine, metadata, src_schema, time_zone_column, wrap_time_allowed
-    )
+    tzc = TimeZoneConverterByColumn(backend, src_schema, time_zone_column, wrap_time_allowed)
     tzc.convert_time_zone(
         scratch_dir=scratch_dir,
         output_file=output_file,
@@ -132,12 +124,10 @@ class TimeZoneConverterBase(abc.ABC):
 
     def __init__(
         self,
-        engine: Engine,
-        metadata: MetaData,
+        backend: IbisBackend,
         from_schema: TableSchema,
     ):
-        self._engine = engine
-        self._metadata = metadata
+        self._backend = backend
         self._check_from_schema(from_schema)
         self._from_schema = from_schema
 
@@ -193,12 +183,11 @@ class TimeZoneConverter(TimeZoneConverterBase):
 
     def __init__(
         self,
-        engine: Engine,
-        metadata: MetaData,
+        backend: IbisBackend,
         from_schema: TableSchema,
         to_time_zone: tzinfo | None,
     ):
-        super().__init__(engine, metadata, from_schema)
+        super().__init__(backend, from_schema)
         self._to_time_zone = to_time_zone
         self._to_schema = self.generate_to_schema()
 
@@ -225,7 +214,7 @@ class TimeZoneConverter(TimeZoneConverterBase):
 
     def generate_to_schema(self) -> TableSchema:
         to_time_config = self.generate_to_time_config()
-        id_cols = self._from_schema.time_array_id_columns
+        id_cols = self._from_schema.time_array_id_columns.copy()
         if to_time_config.time_zone_column not in id_cols:
             id_cols.append(to_time_config.time_zone_column)
         to_schema: TableSchema = self._from_schema.model_copy(
@@ -250,8 +239,7 @@ class TimeZoneConverter(TimeZoneConverterBase):
             mapping_schema,
             self._from_schema,
             self._to_schema,
-            self._engine,
-            self._metadata,
+            self._backend,
             TimeBasedDataAdjustment(),
             scratch_dir=scratch_dir,
             output_file=output_file,
@@ -323,8 +311,7 @@ class TimeZoneConverterByColumn(TimeZoneConverterBase):
 
     def __init__(
         self,
-        engine: Engine,
-        metadata: MetaData,
+        backend: IbisBackend,
         from_schema: TableSchema,
         time_zone_column: str,
         wrap_time_allowed: Optional[bool] = False,
@@ -332,7 +319,7 @@ class TimeZoneConverterByColumn(TimeZoneConverterBase):
         if time_zone_column not in from_schema.time_array_id_columns:
             msg = f"{time_zone_column=} is missing from {from_schema.time_array_id_columns=}"
             raise MissingValue(msg)
-        super().__init__(engine, metadata, from_schema)
+        super().__init__(backend, from_schema)
         self.time_zone_column = time_zone_column
         self._wrap_time_allowed = wrap_time_allowed
         self._to_schema = self.generate_to_schema()
@@ -356,9 +343,9 @@ class TimeZoneConverterByColumn(TimeZoneConverterBase):
         return DatetimeRangeWithTZColumn(**time_kwargs)
 
     def generate_to_schema(self) -> TableSchema:
-        id_cols = self._from_schema.time_array_id_columns
-        if "time_zone" not in id_cols:
-            id_cols.append("time_zone")
+        id_cols = self._from_schema.time_array_id_columns.copy()
+        if self.time_zone_column not in id_cols:
+            id_cols.append(self.time_zone_column)
         to_schema: TableSchema = self._from_schema.model_copy(
             update={
                 "name": f"{self._from_schema.name}_tz_converted",
@@ -381,8 +368,7 @@ class TimeZoneConverterByColumn(TimeZoneConverterBase):
             mapping_schema,
             self._from_schema,
             self._to_schema,
-            self._engine,
-            self._metadata,
+            self._backend,
             TimeBasedDataAdjustment(),
             scratch_dir=scratch_dir,
             output_file=output_file,
@@ -390,16 +376,15 @@ class TimeZoneConverterByColumn(TimeZoneConverterBase):
         )
 
     def _get_time_zones(self) -> list[tzinfo | None]:
-        with self._engine.connect() as conn:
-            table = Table(self._from_schema.name, self._metadata)
-            stmt = (
-                select(table.c[self.time_zone_column])
-                .distinct()
-                .where(table.c[self.time_zone_column].is_not(None))
-            )
-            time_zones = read_database(stmt, conn, self._from_schema.time_config)[
-                self.time_zone_column
-            ].to_list()
+        table = self._backend.table(self._from_schema.name)
+        query = (
+            table.select(table[self.time_zone_column])
+            .distinct()
+            .filter(table[self.time_zone_column].notnull())
+        )
+        time_zones = read_query(self._backend, query, self._from_schema.time_config)[
+            self.time_zone_column
+        ].to_list()
 
         time_zones = [None if tz == "None" else ZoneInfo(tz) for tz in time_zones]
         return time_zones

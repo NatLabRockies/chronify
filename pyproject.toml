@@ -27,24 +27,20 @@ classifiers = [
 ]
 dependencies = [
     "duckdb ~= 1.1.0",
-    "duckdb_engine",
+    "ibis-framework[duckdb,sqlite] >= 9.0",
     "loguru",
     "pandas >= 2.2, < 3",
     "pyarrow",
     "pydantic >= 2.7, < 3",
     "pytz",
     "rich",
-    "sqlalchemy == 2.0.37",
     "tzdata",
-    # Required by pyhive
-    "future",
-    "python-dateutil",
 ]
 
 [project.optional-dependencies]
 spark = [
-    "thrift",
-    "thrift_sasl",
+    "ibis-framework[pyspark]",
+    "pyspark == 4.0.0",
 ]
 
 dev = [
@@ -63,11 +59,6 @@ dev = [
     "sphinx-tabs~=3.4",
 ]
 
-[project.entry-points."sqlalchemy.dialects"]
-hive = "pyhive.sqlalchemy_hive:HiveDialect"
-"hive.http" = "pyhive.sqlalchemy_hive:HiveHTTPDialect"
-"hive.https" = "pyhive.sqlalchemy_hive:HiveHTTPSDialect"
-
 [project.urls]
 Documentation = "https://github.com/NREL/chronify#readme"
 Issues = "https://github.com/NREL/chronify/issues"
@@ -77,10 +68,15 @@ Source = "https://github.com/NREL/chronify"
 files = [
   "src",
 ]
-exclude = [
-    "src/chronify/_vendor/*",
-]
 strict = true
+
+[[tool.mypy.overrides]]
+module = [
+  "ibis.*",
+  "pyarrow.*",
+  "pyspark.*",
+]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 pythonpath = "src"
@@ -99,7 +95,6 @@ exclude = [
     "dist",
     "env",
     "venv",
-    "src/chronify/_vendor/*",
 ]
 
 line-length = 99

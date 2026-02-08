@@ -1,24 +1,27 @@
 import abc
-from functools import reduce
-from operator import and_
 from pathlib import Path
 from typing import Any, Optional
 
+import ibis.expr.datatypes as dt
 import pandas as pd
 from loguru import logger
-from sqlalchemy import Engine, MetaData, Table, select, text, func
-from chronify.hive_functions import create_materialized_view
 
-from chronify.sqlalchemy.functions import (
+from chronify.ibis.backend import IbisBackend
+from chronify.ibis.functions import (
     create_view_from_parquet,
-    write_database,
-    write_query_to_parquet,
+    write_parquet,
+    write_table,
 )
+from chronify.spark_functions import create_materialized_view
 from chronify.models import TableSchema, MappingTableSchema
 from chronify.exceptions import ConflictingInputsError, InvalidOperation
-from chronify.utils.sqlalchemy_table import create_table
 from chronify.time_series_checker import check_timestamps
-from chronify.time import TimeIntervalType, ResamplingOperationType, AggregationType
+from chronify.time import (
+    TimeIntervalType,
+    ResamplingOperationType,
+    AggregationType,
+    TimeDataType,
+)
 from chronify.time_configs import TimeBasedDataAdjustment
 from chronify.utils.path_utils import to_path
 
@@ -28,16 +31,14 @@ class TimeSeriesMapperBase(abc.ABC):
 
     def __init__(
         self,
-        engine: Engine,
-        metadata: MetaData,
+        backend: IbisBackend,
         from_schema: TableSchema,
         to_schema: TableSchema,
         data_adjustment: Optional[TimeBasedDataAdjustment] = None,
         wrap_time_allowed: bool = False,
         resampling_operation: Optional[ResamplingOperationType] = None,
     ) -> None:
-        self._engine = engine
-        self._metadata = metadata
+        self._backend = backend
         self._from_schema = from_schema
         self._to_schema = to_schema
         # data_adjustment is used in mapping creation and time check of mapped time
@@ -86,13 +87,46 @@ class TimeSeriesMapperBase(abc.ABC):
         """Convert time columns with from_schema to to_schema configuration."""
 
 
+def _ensure_mapping_types_match_source(
+    df_mapping: pd.DataFrame,
+    from_schema: TableSchema,
+    backend: IbisBackend,
+) -> pd.DataFrame:
+    """Ensure mapping DataFrame 'from_*' column types match source table column types.
+
+    When unpivoting, column names become string values. The mapping DataFrame may have
+    integer types for columns like 'from_hour'. This function casts those columns
+    to match the source table's types.
+    """
+    source_table = backend.table(from_schema.name)
+    source_schema = source_table.schema()
+
+    df = df_mapping.copy()
+    for col in df.columns:
+        if col.startswith("from_"):
+            source_col = col.removeprefix("from_")
+            if source_col in source_schema:
+                source_type = source_schema[source_col]
+                # Only coerce types when Ibis can determine the source type
+                # Skip if source type is unknown (e.g., SQLite datetime)
+                try:
+                    if source_type.is_string() and not pd.api.types.is_string_dtype(df[col]):
+                        df[col] = df[col].astype(str)
+                    elif source_type.is_integer() and not pd.api.types.is_integer_dtype(df[col]):
+                        df[col] = df[col].astype(int)
+                except AttributeError:
+                    # Unknown type - skip coercion
+                    pass
+
+    return df
+
+
 def apply_mapping(
     df_mapping: pd.DataFrame,
     mapping_schema: MappingTableSchema,
     from_schema: TableSchema,
     to_schema: TableSchema,
-    engine: Engine,
-    metadata: MetaData,
+    backend: IbisBackend,
     data_adjustment: TimeBasedDataAdjustment,
     resampling_operation: Optional[ResamplingOperationType] = None,
     scratch_dir: Optional[Path] = None,
@@ -102,24 +136,38 @@ def apply_mapping(
     """
     Apply mapping to create result table with process to clean up and roll back if checks fail
     """
-    with engine.begin() as conn:
-        write_database(
-            df_mapping,
-            conn,
-            mapping_schema.name,
-            mapping_schema.time_configs,
-            if_table_exists="fail",
-            scratch_dir=scratch_dir,
-        )
-    metadata.reflect(engine, views=True)
+    # Ensure mapping DataFrame column types match source table column types
+    df_mapping = _ensure_mapping_types_match_source(df_mapping, from_schema, backend)
+
+    # Debug: Print mapping DF around target time
+    try:
+        debug_ts = pd.Timestamp("2020-11-01 08:00:00", tz="EST")
+        from_cols = [c for c in df_mapping.columns if c.startswith("from_")]
+        if from_cols:
+            debug_row = df_mapping[df_mapping[from_cols[0]] == debug_ts]
+            print(f"DEBUG: Mapping DF row for {debug_ts}:\n{debug_row}")
+        else:
+            print("DEBUG: No from_ columns in mapping DF")
+    except Exception as e:
+        print(f"DEBUG: Error printing mapping DF: {e}")
+
+    # Create the mapping table
+    write_table(
+        backend,
+        df_mapping,
+        mapping_schema.name,
+        mapping_schema.time_configs,
+        if_exists="fail",
+        scratch_dir=scratch_dir,
+    )
+
     created_tmp_view = False
     try:
         _apply_mapping(
             mapping_schema.name,
             from_schema,
             to_schema,
-            engine,
-            metadata,
+            backend,
             resampling_operation=resampling_operation,
             scratch_dir=scratch_dir,
             output_file=output_file,
@@ -127,109 +175,262 @@ def apply_mapping(
         if check_mapped_timestamps:
             if output_file is not None:
                 output_file = to_path(output_file)
-                with engine.begin() as conn:
-                    create_view_from_parquet(conn, to_schema.name, output_file)
-                metadata.reflect(engine, views=True)
+                create_view_from_parquet(backend, to_schema.name, output_file)
                 created_tmp_view = True
-            mapped_table = Table(to_schema.name, metadata)
-            with engine.connect() as conn:
-                try:
-                    check_timestamps(
-                        conn,
-                        mapped_table,
-                        to_schema,
-                        leap_day_adjustment=data_adjustment.leap_day_adjustment,
-                    )
-                except Exception:
-                    logger.exception(
-                        "check_timestamps failed on mapped table {}. Drop it",
-                        to_schema.name,
-                    )
-                    if output_file is None:
-                        table_type = "VIEW" if engine.name == "hive" else "TABLE"
-                        conn.execute(text(f"DROP {table_type} {to_schema.name}"))
-                    raise
+            mapped_table = backend.table(to_schema.name)
+            try:
+                check_timestamps(
+                    backend,
+                    mapped_table,
+                    to_schema,
+                    leap_day_adjustment=data_adjustment.leap_day_adjustment,
+                )
+            except Exception:
+                logger.exception(
+                    "check_timestamps failed on mapped table {}. Drop it",
+                    to_schema.name,
+                )
+                if output_file is None:
+                    backend.drop_table(to_schema.name, if_exists=True)
+                raise
     finally:
-        with engine.begin() as conn:
-            table_type = "view" if engine.name == "hive" else "table"
-            conn.execute(text(f"DROP {table_type} IF EXISTS {mapping_schema.name}"))
+        table_type = "view" if backend.name == "spark" else "table"
+        backend.execute_sql(f"DROP {table_type} IF EXISTS {mapping_schema.name}")
 
-            if created_tmp_view:
-                conn.execute(text(f"DROP VIEW IF EXISTS {to_schema.name}"))
-                metadata.remove(Table(to_schema.name, metadata))
+        if created_tmp_view:
+            backend.drop_view(to_schema.name, if_exists=True)
 
-        metadata.remove(Table(mapping_schema.name, metadata))
-        metadata.reflect(engine, views=True)
+
+def _build_join_predicate(
+    left_table: Any,
+    right_table: Any,
+    key: str,
+    left_type: Any,
+    right_type: Any,
+) -> Any:
+    """Build a join predicate with appropriate type casting."""
+    left_col = left_table[key]
+    right_col = right_table[f"from_{key}"]
+
+    if left_type is None or right_type is None:
+        return left_col == right_col
+
+    left_is_unknown = not hasattr(left_type, "is_timestamp") or str(left_type).startswith(
+        "unknown"
+    )
+    right_is_timestamp = hasattr(right_type, "is_timestamp") and right_type.is_timestamp()
+    left_is_timestamp = hasattr(left_type, "is_timestamp") and left_type.is_timestamp()
+    right_is_string = hasattr(right_type, "is_string") and right_type.is_string()
+    left_is_string = hasattr(left_type, "is_string") and left_type.is_string()
+
+    if left_is_unknown and right_is_timestamp:
+        left_col = left_col.cast("timestamp")
+    elif left_is_timestamp and right_is_string:
+        right_col = right_col.cast("timestamp")
+    elif left_is_string and right_is_timestamp:
+        left_col = left_col.cast("timestamp")
+
+    return left_col == right_col
+
+
+def _get_timestamp_target_dtype(to_schema: TableSchema, backend_name: str) -> Any:
+    """Get the target dtype for timestamp column casting."""
+    time_config = to_schema.time_config
+    dtype = getattr(time_config, "dtype", None)
+    if dtype == TimeDataType.TIMESTAMP_TZ:
+        start = getattr(time_config, "start", None)
+        tz_obj = start.tzinfo if start is not None else None
+        if backend_name == "sqlite":
+            tz_str = "UTC"
+        elif tz_obj is not None and hasattr(tz_obj, "key"):
+            tz_str = tz_obj.key
+        elif tz_obj:
+            tz_str = str(tz_obj)
+        else:
+            tz_str = "UTC"
+        return dt.Timestamp(timezone=tz_str)
+    return dt.timestamp
+
+
+def _build_column_expr(
+    joined: Any,
+    col: str,
+    left_table_columns: list[str],
+    joined_columns: list[str],
+) -> Any:
+    """Build a column expression, handling name conflicts from join."""
+    if col in left_table_columns and f"{col}_right" in joined_columns:
+        return joined[f"{col}_right"].name(col)
+    return joined[col]
 
 
 def _apply_mapping(
     mapping_table_name: str,
     from_schema: TableSchema,
     to_schema: TableSchema,
-    engine: Engine,
-    metadata: MetaData,
+    backend: IbisBackend,
     resampling_operation: Optional[ResamplingOperationType] = None,
     scratch_dir: Optional[Path] = None,
     output_file: Optional[Path] = None,
 ) -> None:
-    """Apply mapping to create result as a table according to_schema
-    - Columns used to join the from_table are prefixed with "from_" in the mapping table
+    """Apply mapping to create result as a table according to_schema.
+
+    Columns used to join the from_table are prefixed with "from_" in the mapping table.
     """
-    left_table = Table(from_schema.name, metadata)
-    right_table = Table(mapping_table_name, metadata)
-    left_table_columns = [x.name for x in left_table.columns]
-    right_table_columns = [x.name for x in right_table.columns]
+    left_table = backend.table(from_schema.name)
+    right_table = backend.table(mapping_table_name)
+
+    left_table_columns = list(left_table.columns)
+    right_table_columns = list(right_table.columns)
     left_table_pass_thru_columns = set(left_table_columns).difference(
         set(from_schema.list_columns())
     )
 
-    val_col = to_schema.value_column  # from left_table
+    val_col = to_schema.value_column
     final_cols = set(to_schema.list_columns()).union(left_table_pass_thru_columns)
     right_cols = set(right_table_columns).intersection(final_cols)
     left_cols = final_cols - right_cols - {val_col}
 
-    select_stmt: list[Any] = [left_table.c[x] for x in left_cols]
-    select_stmt += [right_table.c[x] for x in right_cols]
-
-    tval_col = left_table.c[val_col]
-    if "factor" in right_table_columns:
-        tval_col *= right_table.c["factor"]  # type: ignore
-    if not resampling_operation:
-        select_stmt.append(tval_col)
-    else:
-        groupby_stmt = select_stmt.copy()
-        match resampling_operation:
-            case AggregationType.SUM:
-                select_stmt.append(func.sum(tval_col).label(val_col))
-            # case AggregationType.AVG:
-            #     select_stmt.append(func.avg(tval_col).label(val_col))
-            # case AggregationType.MIN:
-            #     select_stmt.append(func.min(tval_col).label(val_col))
-            # case AggregationType.MAX:
-            #     select_stmt.append(func.max(tval_col).label(val_col))
-            case _:
-                msg = f"Unsupported {resampling_operation=}"
-                raise InvalidOperation(msg)
-
+    # Build join predicates
     from_keys = [x for x in right_table_columns if x.startswith("from_")]
     keys = [x.removeprefix("from_") for x in from_keys]
     assert set(keys).issubset(
         set(left_table_columns)
     ), f"Keys {keys} not in table={from_schema.name}"
-    on_stmt = reduce(and_, (left_table.c[x] == right_table.c["from_" + x] for x in keys))
 
-    query = select(*select_stmt).select_from(left_table).join(right_table, on_stmt)
-    if resampling_operation:
-        query = query.group_by(*groupby_stmt)
+    predicates = _build_join_predicates(left_table, right_table, keys)
+    joined = left_table.join(right_table, predicates)
+    joined_columns = list(joined.columns)
 
+    # Build select columns
+    select_cols = _build_select_columns(
+        joined, left_cols, right_cols, left_table_columns, joined_columns, to_schema, backend.name
+    )
+
+    # Handle value column with optional factor multiplication
+    tval_col = joined[val_col]
+    if "factor" in right_table_columns:
+        tval_col = tval_col * joined["factor"]
+
+    query = _build_query(
+        joined,
+        select_cols,
+        tval_col,
+        val_col,
+        left_cols,
+        right_cols,
+        left_table_columns,
+        joined_columns,
+        resampling_operation,
+    )
+
+    _write_result(query, to_schema.name, backend, scratch_dir, output_file)
+
+
+def _build_join_predicates(left_table: Any, right_table: Any, keys: list[str]) -> list[Any]:
+    """Build join predicates with type mismatch handling."""
+    left_schema = left_table.schema()
+    right_schema = right_table.schema()
+    predicates = []
+
+    for k in keys:
+        left_type = left_schema.get(k)
+        right_type = right_schema.get(f"from_{k}")
+        try:
+            pred = _build_join_predicate(left_table, right_table, k, left_type, right_type)
+            predicates.append(pred)
+        except Exception:
+            # Fallback: cast both to string
+            predicates.append(
+                left_table[k].cast("string") == right_table[f"from_{k}"].cast("string")
+            )
+
+    return predicates
+
+
+def _build_select_columns(
+    joined: Any,
+    left_cols: set[str],
+    right_cols: set[str],
+    left_table_columns: list[str],
+    joined_columns: list[str],
+    to_schema: TableSchema,
+    backend_name: str,
+) -> list[Any]:
+    """Build the list of columns to select from the joined table."""
+    select_cols: list[Any] = []
+
+    # Left table columns
+    for col in left_cols:
+        select_cols.append(joined[col])
+
+    # Right table columns with potential name conflict handling
+    time_column = getattr(to_schema.time_config, "time_column", None)
+    dtype = getattr(to_schema.time_config, "dtype", None)
+    needs_timestamp_cast = dtype is not None and dtype in (
+        TimeDataType.TIMESTAMP_TZ,
+        TimeDataType.TIMESTAMP_NTZ,
+    )
+
+    for col in right_cols:
+        col_expr = _build_column_expr(joined, col, left_table_columns, joined_columns)
+
+        if col == time_column and needs_timestamp_cast:
+            target_dtype = _get_timestamp_target_dtype(to_schema, backend_name)
+            col_expr = col_expr.cast(target_dtype).name(col)
+
+        select_cols.append(col_expr)
+
+    return select_cols
+
+
+def _build_query(
+    joined: Any,
+    select_cols: list[Any],
+    tval_col: Any,
+    val_col: str,
+    left_cols: set[str],
+    right_cols: set[str],
+    left_table_columns: list[str],
+    joined_columns: list[str],
+    resampling_operation: Optional[ResamplingOperationType],
+) -> Any:
+    """Build the final query with optional aggregation."""
+    if not resampling_operation:
+        select_cols.append(tval_col.name(val_col))
+        return joined.select(select_cols)
+
+    # Aggregation case
+    groupby_cols = [joined[col] for col in left_cols]
+    for col in right_cols:
+        groupby_cols.append(_build_column_expr(joined, col, left_table_columns, joined_columns))
+
+    match resampling_operation:
+        case AggregationType.SUM:
+            agg_col = tval_col.sum().name(val_col)
+        case _:
+            msg = f"Unsupported {resampling_operation=}"
+            raise InvalidOperation(msg)
+
+    return joined.group_by(groupby_cols).aggregate(agg_col)
+
+
+def _write_result(
+    query: Any,
+    table_name: str,
+    backend: IbisBackend,
+    scratch_dir: Optional[Path],
+    output_file: Optional[Path],
+) -> None:
+    """Write the query result to the appropriate destination."""
     if output_file is not None:
         output_file = to_path(output_file)
-        write_query_to_parquet(engine, str(query), output_file, overwrite=True)
+        write_parquet(backend, query, output_file, overwrite=True)
         return
 
-    if engine.name == "hive":
+    if backend.name == "spark":
         create_materialized_view(
-            str(query), to_schema.name, engine, metadata, scratch_dir=scratch_dir
+            str(query.compile()), table_name, backend, scratch_dir=scratch_dir
         )
     else:
-        create_table(to_schema.name, query, engine, metadata)
+        backend.create_table(table_name, query)

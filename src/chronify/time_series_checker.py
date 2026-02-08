@@ -1,13 +1,14 @@
-from sqlalchemy import Connection, Table, select, text
 from typing import Optional
 from datetime import datetime, tzinfo
 
+import ibis.expr.types as ir
 import pandas as pd
 
 from chronify.exceptions import InvalidTable
+from chronify.ibis.backend import IbisBackend
+from chronify.ibis.functions import read_query
 from chronify.models import TableSchema
 from chronify.time_configs import DatetimeRangeWithTZColumn
-from chronify.sqlalchemy.functions import read_database
 from chronify.time_range_generator_factory import make_time_range_generator
 from chronify.datetime_range_generator import DatetimeRangeGeneratorExternalTimeZone
 from chronify.time import LeapDayAdjustmentType
@@ -15,14 +16,14 @@ from chronify.time_utils import is_prevailing_time_zone
 
 
 def check_timestamps(
-    conn: Connection,
-    table: Table,
+    backend: IbisBackend,
+    table: ir.Table,
     schema: TableSchema,
     leap_day_adjustment: Optional[LeapDayAdjustmentType] = None,
 ) -> None:
     """Performs checks on time series arrays in a table."""
     TimeSeriesChecker(
-        conn, table, schema, leap_day_adjustment=leap_day_adjustment
+        backend, table, schema, leap_day_adjustment=leap_day_adjustment
     ).check_timestamps()
 
 
@@ -34,12 +35,12 @@ class TimeSeriesChecker:
 
     def __init__(
         self,
-        conn: Connection,
-        table: Table,
+        backend: IbisBackend,
+        table: ir.Table,
         schema: TableSchema,
         leap_day_adjustment: Optional[LeapDayAdjustmentType] = None,
     ) -> None:
-        self._conn = conn
+        self._backend = backend
         self._schema = schema
         self._table = table
         self._time_generator = make_time_range_generator(
@@ -68,10 +69,13 @@ class TimeSeriesChecker:
         """For tz-naive or tz-aware time without external time zone column"""
         expected = self._time_generator.list_timestamps()
         time_columns = self._time_generator.list_time_columns()
-        stmt = select(*(self._table.c[x] for x in time_columns)).distinct()
+
+        # Build query with distinct and not null filters
+        query = self._table.select([self._table[x] for x in time_columns]).distinct()
         for col in time_columns:
-            stmt = stmt.where(self._table.c[col].is_not(None))
-        df = read_database(stmt, self._conn, self._schema.time_config)
+            query = query.filter(self._table[col].notnull())
+
+        df = read_query(self._backend, query, self._schema.time_config)
         actual = self._time_generator.list_distinct_timestamps_from_dataframe(df)
         expected = sorted(set(expected))  # drop duplicates for tz-naive prevailing time
         check_timestamp_lists(actual, expected)
@@ -86,10 +90,13 @@ class TimeSeriesChecker:
         time_columns = self._time_generator.list_time_columns()
         assert isinstance(self._schema.time_config, DatetimeRangeWithTZColumn)  # for mypy
         time_columns.append(self._schema.time_config.get_time_zone_column())
-        stmt = select(*(self._table.c[x] for x in time_columns)).distinct()
+
+        # Build query with distinct and not null filters
+        query = self._table.select([self._table[x] for x in time_columns]).distinct()
         for col in time_columns:
-            stmt = stmt.where(self._table.c[col].is_not(None))
-        df = read_database(stmt, self._conn, self._schema.time_config)
+            query = query.filter(self._table[col].notnull())
+
+        df = read_query(self._backend, query, self._schema.time_config)
         actual_dct = self._time_generator.list_distinct_timestamps_by_time_zone_from_dataframe(df)
         if sorted(expected_dct.keys()) != sorted(actual_dct.keys()):
             msg = (
@@ -121,16 +128,18 @@ class TimeSeriesChecker:
         any_are_null = " OR ".join((f"{x} IS NULL" for x in time_columns))
         query_all = f"SELECT COUNT(*) FROM {self._schema.name} WHERE {all_are_null}"
         query_any = f"SELECT COUNT(*) FROM {self._schema.name} WHERE {any_are_null}"
-        res_all = self._conn.execute(text(query_all)).fetchone()
-        assert res_all is not None
-        res_any = self._conn.execute(text(query_any)).fetchone()
-        assert res_any is not None
-        if res_all[0] != res_any[0]:
+
+        res_all = self._backend.execute_sql_to_df(query_all)
+        count_all = res_all.iloc[0, 0]
+        res_any = self._backend.execute_sql_to_df(query_any)
+        count_any = res_any.iloc[0, 0]
+
+        if count_all != count_any:
             msg = (
                 "If any time columns have a NULL value for a row, all time columns in that "
                 "row must be NULL. "
-                f"Row count where all time values are NULL: {res_all[0]}. "
-                f"Row count where any time values are NULL: {res_any[0]}. "
+                f"Row count where all time values are NULL: {count_all}. "
+                f"Row count where any time values are NULL: {count_any}. "
             )
             raise InvalidTable(msg)
 
@@ -199,12 +208,13 @@ class TimeSeriesChecker:
                 ON {on_expr}
             """
 
-        for result in self._conn.execute(text(query)).fetchall():
-            distinct_count_by_ta = result[0]
-            count_by_ta = result[1]
+        df = self._backend.execute_sql_to_df(query)
+        for _, row in df.iterrows():
+            distinct_count_by_ta = row.iloc[0]
+            count_by_ta = row.iloc[1]
 
             if has_tz_naive_prevailing and not count_by_ta == count:
-                id_vals = result[2:]
+                id_vals = row.iloc[2:].tolist()
                 values = ", ".join(
                     f"{x}={y}" for x, y in zip(self._schema.time_array_id_columns, id_vals)
                 )
@@ -216,7 +226,7 @@ class TimeSeriesChecker:
                 raise InvalidTable(msg)
 
             if not has_tz_naive_prevailing and not count_by_ta == count == distinct_count_by_ta:
-                id_vals = result[2:]
+                id_vals = row.iloc[2:].tolist()
                 values = ", ".join(
                     f"{x}={y}" for x, y in zip(self._schema.time_array_id_columns, id_vals)
                 )
