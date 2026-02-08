@@ -857,7 +857,7 @@ class Store:
         Examples
         --------
         >>> store = Store()
-        >>> start = datetime(year=2018, month=1, day=1, tzinfo=ZoneInfo("EST"))
+        >>> start = datetime(year=2018, month=1, day=1, tzinfo=ZoneInfo("Etc/GMT+5"))
         >>> freq = timedelta(hours=1)
         >>> hours_per_year = 8760
         >>> num_time_arrays = 1
@@ -945,7 +945,7 @@ class Store:
         Examples
         --------
         >>> store = Store()
-        >>> start = datetime(year=2018, month=1, day=1, tzinfo=ZoneInfo("EST"))
+        >>> start = datetime(year=2018, month=1, day=1, tzinfo=ZoneInfo("Etc/GMT+5"))
         >>> freq = timedelta(hours=1)
         >>> hours_per_year = 8760
         >>> num_time_arrays = 3

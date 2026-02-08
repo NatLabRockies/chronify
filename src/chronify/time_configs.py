@@ -106,14 +106,14 @@ class DatetimeRange(DatetimeRangeBase):
         cls,
         dtype: Optional[Literal[TimeDataType.TIMESTAMP_TZ, TimeDataType.TIMESTAMP_NTZ]],
         info: ValidationInfo,
-    ) -> Literal[TimeDataType.TIMESTAMP_TZ, TimeDataType.TIMESTAMP_NTZ]:
+    ) -> Optional[Literal[TimeDataType.TIMESTAMP_TZ, TimeDataType.TIMESTAMP_NTZ]]:
         match (info.data["start"].tzinfo is None, dtype):
             # assign default dtype if not provided
             case (True, None):
                 dtype = TimeDataType.TIMESTAMP_NTZ
             case (False, None):
                 dtype = TimeDataType.TIMESTAMP_TZ
-            # validate dype if provided
+            # validate dtype if provided
             case (True, TimeDataType.TIMESTAMP_TZ):
                 msg = (
                     "DatetimeRange with tz-naive start time must have dtype TIMESTAMP_NTZ: "
@@ -126,7 +126,6 @@ class DatetimeRange(DatetimeRangeBase):
                     f"\n{info.data['start']=}, {dtype=}"
                 )
                 raise InvalidValue(msg)
-        assert dtype is not None  # All valid cases are handled above
         return dtype
 
 

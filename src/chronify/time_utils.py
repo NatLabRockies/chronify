@@ -1,5 +1,6 @@
 """Functions related to time"""
 
+from calendar import isleap
 import logging
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone, tzinfo
@@ -9,8 +10,11 @@ import pandas as pd
 from numpy.typing import NDArray
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from chronify.time import (
+    LeapDayAdjustmentType,
+    TimeIntervalType,
+)
 from chronify.exceptions import InvalidParameter
-from chronify.time import TimeIntervalType
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +37,7 @@ def shifted_interval_timestamps(
     ts_list: Sequence[datetime],
     from_interval_type: TimeIntervalType,
     to_interval_type: TimeIntervalType,
-) -> list[datetime]:
+) -> list[pd.Timestamp]:
     """Shift ts_list by ONE time interval based on interval type.
 
     Example:
@@ -103,8 +107,8 @@ def wrapped_time_timestamps(
     upper_cond = arr > tmax
     if upper_cond.sum() > 0:
         arr2.loc[upper_cond] -= tdelta
-    ts_list2 = arr2.tolist()
-    return ts_list2  # type: ignore
+    ts_list2: list[pd.Timestamp] = arr2.tolist()
+    return ts_list2
 
 
 def rolled_interval_timestamps(
@@ -184,3 +188,40 @@ def get_tzname(tz: tzinfo | None) -> str:
         return tz.key
     ts = datetime(year=2020, month=1, day=1, tzinfo=tz)
     return tz.tzname(ts)  # type: ignore
+
+
+def list_timestamps(
+    start: datetime, length: int, resolution: timedelta, adjustment: LeapDayAdjustmentType
+) -> list[pd.Timestamp]:
+    """Generate timestamps with adjustment using pd.date_range().
+    Established time library can handle historical changes in time zone conversion to UTC.
+    (e.g. Algeria (Africa/Algiers) changed from UTC+0 to UTC+1 on April 25, 1980)
+    """
+    pd_timestamps = pd.date_range(
+        start=start,
+        periods=length,
+        freq=resolution,
+    )
+
+    match adjustment:
+        case LeapDayAdjustmentType.DROP_FEB29:
+            timestamps = [
+                ts
+                for ts in pd_timestamps
+                if not (isleap(ts.year) and ts.month == 2 and ts.day == 29)
+            ]
+        case LeapDayAdjustmentType.DROP_DEC31:
+            timestamps = [
+                ts
+                for ts in pd_timestamps
+                if not (isleap(ts.year) and ts.month == 12 and ts.day == 31)
+            ]
+        case LeapDayAdjustmentType.DROP_JAN1:
+            timestamps = [
+                ts
+                for ts in pd_timestamps
+                if not (isleap(ts.year) and ts.month == 1 and ts.day == 1)
+            ]
+        case _:
+            timestamps = pd_timestamps.tolist()
+    return timestamps

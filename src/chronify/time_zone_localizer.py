@@ -2,13 +2,12 @@ import abc
 import warnings
 from zoneinfo import ZoneInfo
 from datetime import tzinfo
+from chronify.ibis.backend import IbisBackend
 from typing import Optional
 from pathlib import Path
 import pandas as pd
 from pandas import DatetimeTZDtype
 
-from chronify.ibis.backend import IbisBackend
-from chronify.ibis.functions import read_query
 from chronify.models import TableSchema, MappingTableSchema
 from chronify.time_configs import (
     DatetimeRangeBase,
@@ -23,6 +22,7 @@ from chronify.datetime_range_generator import (
 from chronify.exceptions import InvalidParameter, MissingValue
 from chronify.time_series_mapper_base import apply_mapping
 from chronify.time_range_generator_factory import make_time_range_generator
+from chronify.ibis.functions import read_query
 from chronify.time import TimeDataType, TimeType
 from chronify.time_series_mapper import map_time
 from chronify.time_utils import get_standard_time_zone, is_standard_time_zone
@@ -44,7 +44,7 @@ def localize_time_zone(
 
     Parameters
     ----------
-    backend : IbisBackend
+    backend
         Ibis backend.
     src_schema : TableSchema
         Defines the source table in the database.
@@ -86,7 +86,7 @@ def localize_time_zone_by_column(
 
     Parameters
     ----------
-    backend : IbisBackend
+    backend
         Ibis backend.
     src_schema : TableSchema
         Defines the source table in the database.
@@ -176,19 +176,24 @@ class TimeZoneLocalizer(TimeZoneLocalizerBase):
 
     @staticmethod
     def _check_from_schema(from_schema: TableSchema) -> None:
+        msg = ""
+        if not isinstance(from_schema.time_config, DatetimeRange):
+            msg += "Source schema does not have DatetimeRange time config. "
         if isinstance(from_schema.time_config, DatetimeRangeWithTZColumn):
-            msg = (
-                "Source schema time config is of type DatetimeRangeWithTZColumn, "
+            msg += (
+                "Instead, time config is of type DatetimeRangeWithTZColumn, "
                 f"try using TimeZoneLocalizerByColumn(). {from_schema.time_config}"
             )
             raise InvalidParameter(msg)
-        if not isinstance(from_schema.time_config, DatetimeRange):
-            msg = f"Source schema does not have DatetimeRange time config.\n{from_schema.time_config}"
-            raise InvalidParameter(msg)
-        msg = ""
-        if from_schema.time_config.dtype != TimeDataType.TIMESTAMP_NTZ:
+        if (
+            isinstance(from_schema.time_config, DatetimeRange)
+            and from_schema.time_config.dtype != TimeDataType.TIMESTAMP_NTZ
+        ):
             msg += "Source schema time config dtype must be TIMESTAMP_NTZ. "
-        if from_schema.time_config.start_time_is_tz_naive() is False:
+        if (
+            isinstance(from_schema.time_config, DatetimeRange)
+            and from_schema.time_config.start_time_is_tz_naive() is False
+        ):
             msg += (
                 "Source schema time config start time must be tz-naive."
                 "To convert between time zones for tz-aware timestamps, "
@@ -212,7 +217,7 @@ class TimeZoneLocalizer(TimeZoneLocalizerBase):
         return to_time_zone
 
     def generate_to_time_config(self) -> DatetimeRange:
-        assert isinstance(self._from_schema.time_config, DatetimeRange)  # mypy
+        assert isinstance(self._from_schema.time_config, DatetimeRange)
         to_time_config: DatetimeRange = self._from_schema.time_config.model_copy(
             update={
                 "dtype": TimeDataType.TIMESTAMP_TZ
@@ -276,6 +281,8 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
     --------------------------------
     """
 
+    time_zone_column: str
+
     def __init__(
         self,
         backend: IbisBackend,
@@ -284,14 +291,13 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
     ):
         self._check_from_schema(from_schema)
         self._check_time_zone_column(from_schema, time_zone_column)
-        # Make a deep copy to avoid mutating the original schema
-        from_schema_copy = from_schema.model_copy(deep=True)
-        super().__init__(backend, from_schema_copy)
+        super().__init__(backend, from_schema)
         if isinstance(self._from_schema.time_config, DatetimeRange):
+            assert time_zone_column is not None  # validated by _check_time_zone_column
             self.time_zone_column = time_zone_column
             self._convert_from_time_config_to_datetime_range_with_tz_column()
         else:
-            assert isinstance(self._from_schema.time_config, DatetimeRangeWithTZColumn)  # mypy
+            assert isinstance(self._from_schema.time_config, DatetimeRangeWithTZColumn)
             self.time_zone_column = self._from_schema.time_config.time_zone_column
         self._check_standard_time_zones()
         self._to_schema = self.generate_to_schema()
@@ -303,9 +309,10 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
             msg += (
                 "Source schema must have DatetimeRange or DatetimeRangeWithTZColumn time config. "
             )
-            msg += f"\n{from_schema.time_config}"
-            raise InvalidParameter(msg)
-        if from_schema.time_config.dtype != TimeDataType.TIMESTAMP_NTZ:
+        if (
+            isinstance(from_schema.time_config, (DatetimeRange, DatetimeRangeWithTZColumn))
+            and from_schema.time_config.dtype != TimeDataType.TIMESTAMP_NTZ
+        ):
             msg += "Source schema time config dtype must be TIMESTAMP_NTZ. "
         if msg != "":
             msg += f"\n{from_schema.time_config}"
@@ -318,20 +325,17 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
             and time_zone_column is not None
         ):
             msg = f"Input {time_zone_column=} will be ignored. time_zone_column is already defined in the time_config."
-            warnings.warn(msg, stacklevel=3)
+            warnings.warn(msg)
 
         msg = ""
         if isinstance(from_schema.time_config, DatetimeRange) and time_zone_column is None:
             msg += "time_zone_column must be provided when source schema time config is of type DatetimeRange. "
-        # if time_zone_column not in from_schema.time_array_id_columns:
-        #     msg = f"{time_zone_column=} must be in source schema time_array_id_columns."
-        if msg != "":
             msg += f"\n{from_schema}"
-            raise InvalidParameter(msg)
+            raise MissingValue(msg)
 
     def _check_standard_time_zones(self) -> None:
         """Check that all time zones in the time_zone_column are valid standard time zones."""
-        assert isinstance(self._from_schema.time_config, DatetimeRangeWithTZColumn)  # mypy
+        assert isinstance(self._from_schema.time_config, DatetimeRangeWithTZColumn)
         msg = ""
         time_zones = self._from_schema.time_config.time_zones
         for tz in time_zones:
@@ -367,7 +371,7 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
         self._from_schema.time_config = DatetimeRangeWithTZColumn(**time_kwargs)
 
     def generate_to_time_config(self) -> DatetimeRangeBase:
-        assert isinstance(self._from_schema.time_config, DatetimeRangeWithTZColumn)  # mypy
+        assert isinstance(self._from_schema.time_config, DatetimeRangeWithTZColumn)
         match self._from_schema.time_config.start_time_is_tz_naive():
             case True:
                 # tz-naive start, aligned_in_local_time of the time zones
@@ -399,10 +403,9 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
                 raise InvalidParameter(msg)
 
     def generate_to_schema(self) -> TableSchema:
-        id_cols = self._from_schema.time_array_id_columns.copy()
-        assert self.time_zone_column is not None  # Validated in __init__
-        if self.time_zone_column not in id_cols:
-            id_cols.append(self.time_zone_column)
+        id_cols = self._from_schema.time_array_id_columns
+        if "time_zone" not in id_cols:
+            id_cols.append("time_zone")
         to_schema: TableSchema = self._from_schema.model_copy(
             update={
                 "name": f"{self._from_schema.name}_tz_converted",
@@ -439,8 +442,9 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
             .distinct()
             .filter(table[self.time_zone_column].notnull())
         )
-        df = read_query(self._backend, query, self._from_schema.time_config)
-        time_zones = df[self.time_zone_column].to_list()
+        time_zones = read_query(self._backend, query, self._from_schema.time_config)[
+            self.time_zone_column
+        ].to_list()
 
         if "None" in time_zones and len(time_zones) > 1:
             msg = (
@@ -455,20 +459,18 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
 
     def _create_mapping(self) -> tuple[pd.DataFrame, MappingTableSchema]:
         """Create mapping dataframe for localizing tz-naive datetime to column time zones"""
-        assert isinstance(
-            self._from_schema.time_config, DatetimeRangeWithTZColumn
-        )  # Ensured by __init__
+        assert isinstance(self._from_schema.time_config, DatetimeRangeWithTZColumn)
         time_col = self._from_schema.time_config.time_column
         from_time_col = "from_" + time_col
         from_time_generator = make_time_range_generator(self._from_schema.time_config)
-        assert isinstance(from_time_generator, DatetimeRangeGeneratorExternalTimeZone)  # mypy
+        assert isinstance(from_time_generator, DatetimeRangeGeneratorExternalTimeZone)
         from_time_data_dct = from_time_generator.list_timestamps_by_time_zone()
 
         to_time_generator = make_time_range_generator(self._to_schema.time_config)
         match to_time_generator:
-            case DatetimeRangeGeneratorExternalTimeZone():  # mypy
+            case DatetimeRangeGeneratorExternalTimeZone():
                 to_time_data_dct = to_time_generator.list_timestamps_by_time_zone()
-            case DatetimeRangeGenerator():  # mypy
+            case DatetimeRangeGenerator():
                 to_time_data = to_time_generator.list_timestamps()
                 to_time_data_dct = {tz_name: to_time_data for tz_name in from_time_data_dct.keys()}
             case _:
@@ -479,7 +481,6 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
                 )
                 raise InvalidParameter(msg)
 
-        assert self.time_zone_column is not None  # Validated in __init__
         from_tz_col = "from_" + self.time_zone_column
         from_time_config = self._from_schema.time_config.model_copy(
             update={"time_column": from_time_col}

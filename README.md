@@ -18,12 +18,12 @@ $ pip install chronify
 
 To use Apache Spark via Apache Thrift Server as the backend:
 ```
-$ pip install chronify --group=pyhive
+$ pip install "chronify[spark]"
 ```
 
 ## Developer installation
 ```
-$ pip install -e ".[dev]" --group=pyhive
+$ pip install -e ".[dev,spark]"
 ```
 
 Please install `pre-commit` so that your code is checked before making commits.

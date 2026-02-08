@@ -38,9 +38,10 @@ To use DuckDB or SQLite as the backend:
 ```
 
 To use Apache Spark via Apache Thrift Server as the backend, you must install pyhive.
+This command will install the necessary dependencies.
 
 ```{eval-rst}
 .. code-block:: console
 
-    $ pip install chronify --group=pyhive
+    $ pip install "chronify[spark]"
 ```

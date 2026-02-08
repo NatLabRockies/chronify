@@ -188,7 +188,7 @@ def test_time_interval_shift_different_time_ranges(
     "tzinfo_tuple",
     [
         # (ZoneInfo("US/Eastern"), None),
-        (None, ZoneInfo("EST")),
+        (None, ZoneInfo("Etc/GMT+5")),
         # (ZoneInfo("US/Eastern"), ZoneInfo("US/Mountain")),
     ],
 )

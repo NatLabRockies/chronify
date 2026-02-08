@@ -30,7 +30,7 @@ def check_timestamps(
 class TimeSeriesChecker:
     """Performs checks on time series arrays in a table.
     Timestamps in the table will be checked against expected timestamps generated from the
-    TableSchema's time_config. TZ-awareness of the generated timestamps will match that of the table.
+    TableSchema's time_config. TZ-awareness of the generated timestamps will match that of thetable.
     """
 
     def __init__(
@@ -82,7 +82,9 @@ class TimeSeriesChecker:
         return len(expected)
 
     def _check_expected_timestamps_with_external_time_zone(self) -> int:
-        """For tz-naive time with external time zone column"""
+        """For tz-naive or tz-aware time with external time zone column
+        tz-awareness is based on self._schema.time_config.dtype
+        """
         assert isinstance(self._time_generator, DatetimeRangeGeneratorExternalTimeZone)  # for mypy
         expected_dct = self._time_generator.list_timestamps_by_time_zone()
         time_columns = self._time_generator.list_time_columns()
@@ -100,6 +102,7 @@ class TimeSeriesChecker:
             msg = (
                 "Time zone records do not match between expected and actual from table "
                 f"\nexpected: {sorted(expected_dct.keys())} vs. \nactual: {sorted(actual_dct.keys())}"
+                f"\ntime_config: {self._schema.time_config}"
             )
             raise InvalidTable(msg)
 
@@ -205,8 +208,8 @@ class TimeSeriesChecker:
                 ON {on_expr}
             """
 
-        results = self._backend.execute_sql_to_df(query)
-        for _, row in results.iterrows():
+        df = self._backend.execute_sql_to_df(query)
+        for _, row in df.iterrows():
             distinct_count_by_ta = row.iloc[0]
             count_by_ta = row.iloc[1]
 
