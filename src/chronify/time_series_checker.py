@@ -27,7 +27,10 @@ def check_timestamps(
 
 
 class TimeSeriesChecker:
-    """Performs checks on time series arrays in a table."""
+    """Performs checks on time series arrays in a table.
+    Timestamps in the table will be checked against expected timestamps generated from the
+    TableSchema's time_config. TZ-awareness of the generated timestamps will match that of thetable.
+    """
 
     def __init__(
         self,
@@ -75,7 +78,9 @@ class TimeSeriesChecker:
         return len(expected)
 
     def _check_expected_timestamps_with_external_time_zone(self) -> int:
-        """For tz-naive time with external time zone column"""
+        """For tz-naive or tz-aware time with external time zone column
+        tz-awareness is based on self._schema.time_config.dtype
+        """
         assert isinstance(self._time_generator, DatetimeRangeGeneratorExternalTimeZone)  # for mypy
         expected_dct = self._time_generator.list_timestamps_by_time_zone()
         time_columns = self._time_generator.list_time_columns()
@@ -86,11 +91,11 @@ class TimeSeriesChecker:
             stmt = stmt.where(self._table.c[col].is_not(None))
         df = read_database(stmt, self._conn, self._schema.time_config)
         actual_dct = self._time_generator.list_distinct_timestamps_by_time_zone_from_dataframe(df)
-
         if sorted(expected_dct.keys()) != sorted(actual_dct.keys()):
             msg = (
                 "Time zone records do not match between expected and actual from table "
                 f"\nexpected: {sorted(expected_dct.keys())} vs. \nactual: {sorted(actual_dct.keys())}"
+                f"\ntime_config: {self._schema.time_config}"
             )
             raise InvalidTable(msg)
 
@@ -193,6 +198,7 @@ class TimeSeriesChecker:
                 JOIN t2
                 ON {on_expr}
             """
+
         for result in self._conn.execute(text(query)).fetchall():
             distinct_count_by_ta = result[0]
             count_by_ta = result[1]

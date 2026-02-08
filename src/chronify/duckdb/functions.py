@@ -15,7 +15,6 @@ def add_datetime_column(
     timestamps: list[datetime],
 ) -> DuckDBPyRelation:
     """Add a datetime column to the relation."""
-    # TODO
     raise NotImplementedError
     # values = []
     # columns = ",".join(rel.columns)

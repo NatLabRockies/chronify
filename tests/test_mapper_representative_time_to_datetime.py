@@ -14,8 +14,8 @@ from chronify.time import TimeIntervalType
 from chronify.datetime_range_generator import DatetimeRangeGenerator
 
 
-def generate_datetime_data(time_config: DatetimeRange) -> pd.Series:
-    return pd.to_datetime(list(DatetimeRangeGenerator(time_config)._iter_timestamps()))
+def generate_datetime_data(time_config: DatetimeRange) -> pd.DatetimeIndex:
+    return pd.to_datetime(DatetimeRangeGenerator(time_config).list_timestamps())
 
 
 def get_datetime_schema(year: int, tzinfo: tzinfo | None) -> TableSchema:

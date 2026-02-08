@@ -51,7 +51,7 @@ GENERATOR_TIME_SERIES_FILE = "tests/data/gen.csv"
 @pytest.fixture
 def generators_schema():
     time_config = DatetimeRange(
-        start=datetime(year=2020, month=1, day=1, tzinfo=ZoneInfo("EST")),
+        start=datetime(year=2020, month=1, day=1, tzinfo=ZoneInfo("Etc/GMT+5")),
         resolution=timedelta(hours=1),
         length=8784,
         interval_type=TimeIntervalType.PERIOD_BEGINNING,
@@ -117,7 +117,7 @@ def test_ingest_csv(iter_stores_by_engine: Store, tmp_path, generators_schema, u
         new_src_file = tmp_path / "gen_tz.csv"
         duckdb.sql(
             f"""
-            SELECT timezone('EST', timestamp) as timestamp, gen1, gen2, gen3
+            SELECT timezone('Etc/GMT+5', timestamp) as timestamp, gen1, gen2, gen3
             FROM read_csv('{src_file}')
         """
         ).to_df().to_csv(new_src_file, index=False)
@@ -318,7 +318,7 @@ def test_load_parquet(iter_stores_by_engine_no_data_ingestion: Store, tmp_path):
         return
 
     time_config = DatetimeRange(
-        start=datetime(year=2020, month=1, day=1, tzinfo=ZoneInfo("EST")),
+        start=datetime(year=2020, month=1, day=1, tzinfo=ZoneInfo("Etc/GMT+5")),
         resolution=timedelta(hours=1),
         length=8784,
         interval_type=TimeIntervalType.PERIOD_BEGINNING,
@@ -435,7 +435,7 @@ def test_map_one_week_per_month_by_hour_to_datetime(
         store.map_table_time_config(src_schema.name, dst_schema, check_mapped_timestamps=True)
 
 
-@pytest.mark.parametrize("tzinfo", [ZoneInfo("EST"), None])
+@pytest.mark.parametrize("tzinfo", [ZoneInfo("Etc/GMT+5"), None])
 def test_map_datetime_to_datetime(
     tmp_path, iter_stores_by_engine_no_data_ingestion: Store, tzinfo
 ):
@@ -536,7 +536,7 @@ def test_map_index_time_to_datetime(
         time_array_id_columns=["generator"],
         value_column="value",
         time_config=DatetimeRange(
-            start=datetime(year=year, month=1, day=1, hour=1, tzinfo=ZoneInfo("EST")),
+            start=datetime(year=year, month=1, day=1, hour=1, tzinfo=ZoneInfo("Etc/GMT+5")),
             resolution=timedelta(hours=1),
             length=time_array_len,
             interval_type=TimeIntervalType.PERIOD_ENDING,
@@ -793,7 +793,7 @@ def test_convert_time_zone(
     store = iter_stores_by_engine_no_data_ingestion
     time_array_len = 8784
     year = 2020
-    tzinfo = ZoneInfo("EST")
+    tzinfo = ZoneInfo("Etc/GMT+5")
 
     src_time_config = DatetimeRange(
         start=datetime(year=year, month=1, day=1, hour=0, tzinfo=tzinfo),
@@ -865,7 +865,7 @@ def test_convert_time_zone_by_column(
     store = iter_stores_by_engine_no_data_ingestion
     time_array_len = 8784
     year = 2020
-    tzinfo = ZoneInfo("EST")
+    tzinfo = ZoneInfo("Etc/GMT+5")
 
     src_time_config = DatetimeRange(
         start=datetime(year=year, month=1, day=1, hour=0, tzinfo=tzinfo),
@@ -935,6 +935,158 @@ def test_convert_time_zone_by_column(
             ZoneInfo("US/Central")
         ).replace(tzinfo=None)
     assert isinstance(dst_schema.time_config, DatetimeRangeWithTZColumn)
+    expected_dct = make_time_range_generator(dst_schema.time_config).list_timestamps_by_time_zone()
+    for tz, expected in expected_dct.items():
+        actual = sorted(df2.loc[df2["time_zone"] == tz, "timestamp"])
+        check_timestamp_lists(actual, expected)
+
+
+@pytest.mark.parametrize("to_time_zone", [ZoneInfo("UTC"), ZoneInfo("Etc/GMT+5"), None])
+def test_localize_time_zone(
+    tmp_path, iter_stores_by_engine_no_data_ingestion: Store, to_time_zone: tzinfo | None
+):
+    """Test time zone localization of tz-naive timestamps to a specified time zone."""
+    store = iter_stores_by_engine_no_data_ingestion
+    time_array_len = 8784
+    year = 2020
+
+    # Create tz-naive source time config
+    src_time_config = DatetimeRange(
+        start=datetime(year=year, month=1, day=1, hour=0, tzinfo=None),
+        resolution=timedelta(hours=1),
+        length=time_array_len,
+        interval_type=TimeIntervalType.PERIOD_BEGINNING,
+        time_column="timestamp",
+    )
+
+    src_csv_schema = CsvTableSchema(
+        time_config=src_time_config,
+        column_dtypes=[
+            ColumnDType(name="timestamp", dtype=DateTime(timezone=False)),
+            ColumnDType(name="gen1", dtype=Double()),
+            ColumnDType(name="gen2", dtype=Double()),
+            ColumnDType(name="gen3", dtype=Double()),
+        ],
+        value_columns=["gen1", "gen2", "gen3"],
+        pivoted_dimension_name="generator",
+        time_array_id_columns=[],
+    )
+    rel = read_csv(GENERATOR_TIME_SERIES_FILE, src_csv_schema)
+    rel2 = unpivot(rel, ("gen1", "gen2", "gen3"), "generator", "value")  # noqa: F841
+
+    src_schema = TableSchema(
+        name="generators_pb",
+        time_config=src_time_config,
+        time_array_id_columns=["generator"],
+        value_column="value",
+    )
+    if store.engine.name == "hive":
+        out_file = tmp_path / "data.parquet"
+        rel2.to_df().to_parquet(out_file)
+        store.create_view_from_parquet(out_file, src_schema)
+    else:
+        store.ingest_table(rel2, src_schema)
+
+    if to_time_zone is None and store.engine.name != "sqlite":
+        output_file = tmp_path / "mapped_data"
+    else:
+        output_file = None
+
+    dst_schema = store.localize_time_zone(
+        src_schema.name,
+        to_time_zone,
+        output_file=output_file,
+        check_mapped_timestamps=True,
+    )
+    if output_file is None or store.engine.name == "sqlite":
+        df2 = store.read_table(dst_schema.name)
+    else:
+        df2 = pd.read_parquet(output_file)
+    df2["timestamp"] = pd.to_datetime(df2["timestamp"])
+    assert len(df2) == time_array_len * 3
+    actual = sorted(df2["timestamp"].unique())
+    assert isinstance(dst_schema.time_config, DatetimeRange)
+    if to_time_zone:
+        # Should be localized to the target time zone
+        assert dst_schema.time_config.start_time_is_tz_naive() is False
+    else:
+        # Should remain tz-naive
+        assert dst_schema.time_config.start_time_is_tz_naive() is True
+    assert pd.Timestamp(actual[0]) == dst_schema.time_config.start
+    expected = make_time_range_generator(dst_schema.time_config).list_timestamps()
+    expected = sorted(set(expected))
+    check_timestamp_lists(actual, expected)
+
+
+def test_localize_time_zone_by_column(tmp_path, iter_stores_by_engine_no_data_ingestion: Store):
+    """Test time zone localization based on a time zone column."""
+    store = iter_stores_by_engine_no_data_ingestion
+    time_array_len = 8784
+    year = 2020
+
+    # Create tz-naive source time config
+    src_time_config = DatetimeRange(
+        start=datetime(year=year, month=1, day=1, hour=0, tzinfo=None),
+        resolution=timedelta(hours=1),
+        length=time_array_len,
+        interval_type=TimeIntervalType.PERIOD_BEGINNING,
+        time_column="timestamp",
+    )
+
+    src_csv_schema = CsvTableSchema(
+        time_config=src_time_config,
+        column_dtypes=[
+            ColumnDType(name="timestamp", dtype=DateTime(timezone=False)),
+            ColumnDType(name="gen1", dtype=Double()),
+            ColumnDType(name="gen2", dtype=Double()),
+            ColumnDType(name="gen3", dtype=Double()),
+        ],
+        value_columns=["gen1", "gen2", "gen3"],
+        pivoted_dimension_name="generator",
+        time_array_id_columns=[],
+    )
+    rel = read_csv(GENERATOR_TIME_SERIES_FILE, src_csv_schema)
+    rel2 = unpivot(rel, ("gen1", "gen2", "gen3"), "generator", "value")  # noqa: F841
+    # add time_zone column with standard time zones (not DST)
+    stmt = ", ".join(rel2.columns)
+    tz_col_stmt = "CASE WHEN generator='gen1' THEN 'Etc/GMT+5' WHEN generator='gen2' THEN 'Etc/GMT+6' ELSE 'Etc/GMT+7' END AS time_zone"
+    stmt += f", {tz_col_stmt}"
+    rel2 = rel2.project(stmt)
+
+    src_schema = TableSchema(
+        name="generators_pb",
+        time_config=src_time_config,
+        time_array_id_columns=["generator", "time_zone"],
+        value_column="value",
+    )
+    if store.engine.name == "hive":
+        out_file = tmp_path / "data.parquet"
+        rel2.to_df().to_parquet(out_file)
+        store.create_view_from_parquet(out_file, src_schema)
+    else:
+        store.ingest_table(rel2, src_schema)
+
+    if store.engine.name != "sqlite":
+        output_file = tmp_path / "mapped_data"
+    else:
+        output_file = None
+
+    dst_schema = store.localize_time_zone_by_column(
+        src_schema.name,
+        "time_zone",
+        output_file=output_file,
+        check_mapped_timestamps=True,
+    )
+    if output_file is None or store.engine.name == "sqlite":
+        df2 = store.read_table(dst_schema.name)
+    else:
+        df2 = pd.read_parquet(output_file)
+    df2["timestamp"] = pd.to_datetime(df2["timestamp"])
+    df_stats = df2.groupby(["time_zone"])["timestamp"].agg(["min", "max", "count"])
+    assert set(df_stats["count"]) == {time_array_len}
+    assert isinstance(dst_schema.time_config, DatetimeRangeWithTZColumn)
+    # Verify that each time zone has tz-aware localized timestamps
+    assert df2["timestamp"].dt.tz is not None
     expected_dct = make_time_range_generator(dst_schema.time_config).list_timestamps_by_time_zone()
     for tz, expected in expected_dct.items():
         actual = sorted(df2.loc[df2["time_zone"] == tz, "timestamp"])

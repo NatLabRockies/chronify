@@ -1,6 +1,6 @@
 import abc
 from zoneinfo import ZoneInfo
-from datetime import datetime, tzinfo
+from datetime import tzinfo
 from sqlalchemy import Engine, MetaData, Table, select
 from typing import Optional
 from pathlib import Path
@@ -20,10 +20,11 @@ from chronify.exceptions import InvalidParameter, MissingValue
 from chronify.time_series_mapper_base import apply_mapping
 from chronify.time_range_generator_factory import make_time_range_generator
 from chronify.sqlalchemy.functions import read_database
-from chronify.time import TimeType
+from chronify.time import TimeDataType, TimeType
 from chronify.time_utils import wrapped_time_timestamps, get_tzname
 
 
+# TODO - allow option to retain original timestamp column - Issue #64
 def convert_time_zone(
     engine: Engine,
     metadata: MetaData,
@@ -143,15 +144,22 @@ class TimeZoneConverterBase(abc.ABC):
     def _check_from_schema(self, from_schema: TableSchema) -> None:
         msg = ""
         if not isinstance(from_schema.time_config, DatetimeRange):
-            msg += "Source schema does not have DatetimeRange time config. "
+            msg += "Source schema must have DatetimeRange time config. "
+        if (
+            isinstance(from_schema.time_config, DatetimeRange)
+            and from_schema.time_config.dtype != TimeDataType.TIMESTAMP_TZ
+        ):
+            msg += "Source schema time config dtype must be Timestamp_TZ. "
         if (
             isinstance(from_schema.time_config, DatetimeRange)
             and from_schema.time_config.start_time_is_tz_naive()
         ):
             msg += (
-                "Source schema start_time must be timezone-aware. "
-                "To convert from timezone-naive to timezone-aware, "
-                "use the TimeSeriesMapperDatetime.map_time() method instead. "
+                "Source schema time config start time must be timezone-aware. "
+                "This converter will convert time zones and return timestamps as tz-naive "
+                "along with time zone information in a column. "
+                "To localize timestamps from timezone-naive to timezone-aware, "
+                "use TimeZoneLocalizer() or TimeZoneLocalizerByColumn() instead. "
             )
         if msg != "":
             raise InvalidParameter(msg)
@@ -171,7 +179,17 @@ class TimeZoneConverterBase(abc.ABC):
 
 
 class TimeZoneConverter(TimeZoneConverterBase):
-    """Class for time zone conversion of time series data to a specified time zone."""
+    """Class for time zone conversion of tz-aware, aligned_in_absolute_time
+    time series data to a specified time zone.
+
+    Input data table must contain tz-aware timestamps.
+    Input time config must be of type DatetimeRange with Timestamp_TZ dtype and tz-aware start time.
+    Output data table will contain tz-naive timestamps with time zone recorded in a column
+    Output time config will be of type DatetimeRange with Timestamp_NTZ dtype and tz-naive start time.
+
+    # TODO: support DatetimeRangeWithTZColumn as input time config - Issue #64
+    # TODO: support wrap_time_allowed option - Issue #64
+    """
 
     def __init__(
         self,
@@ -186,20 +204,20 @@ class TimeZoneConverter(TimeZoneConverterBase):
 
     def generate_to_time_config(self) -> DatetimeRangeWithTZColumn:
         assert isinstance(self._from_schema.time_config, DatetimeRange)  # mypy
-        to_time_config = self._from_schema.time_config.model_copy()
-        if self._to_time_zone:
-            to_time_config.start = to_time_config.start.astimezone(self._to_time_zone).replace(
-                tzinfo=None
-            )
-        else:
-            to_time_config.start = to_time_config.start.replace(tzinfo=None)
-        time_kwargs = to_time_config.model_dump()
+        time_kwargs = self._from_schema.time_config.model_dump()
         time_kwargs = dict(
             filter(
                 lambda k_v: k_v[0] in DatetimeRangeWithTZColumn.model_fields,
                 time_kwargs.items(),
             )
         )
+        if self._to_time_zone:
+            time_kwargs["start"] = (
+                time_kwargs["start"].astimezone(self._to_time_zone).replace(tzinfo=None)
+            )
+        else:
+            time_kwargs["start"] = time_kwargs["start"].replace(tzinfo=None)
+        time_kwargs["dtype"] = TimeDataType.TIMESTAMP_NTZ
         time_kwargs["time_type"] = TimeType.DATETIME_TZ_COL
         time_kwargs["time_zone_column"] = "time_zone"
         time_kwargs["time_zones"] = [self._to_time_zone]
@@ -274,7 +292,34 @@ class TimeZoneConverter(TimeZoneConverterBase):
 
 
 class TimeZoneConverterByColumn(TimeZoneConverterBase):
-    """Class for time zone conversion of time series data based on a time zone column."""
+    """Class for time zone conversion of tz-aware, aligned_in_absolute_time
+    time series data based on a time zone column.
+
+    Input data table must contain tz-aware timestamps and a time zone column.
+    Input time config must be of type DatetimeRangeWithTZColumn or DatetimeRange with Timestamp_TZ dtype.
+     - If DatetimeRange is used, time_zone_column must be provided.
+     - If DatetimeRangeWithTZColumn is used, it is converted to DatetimeRange internally.
+     time_zone_column, if provided, is ignored and instead taken from the time_config.
+    Output data table will contain tz-naive timestamps and the original time zone column.
+    Output time config will be of type DatetimeRangeWithTZColumn with Timestamp_NTZ dtype (see scenarios).
+
+    I/O Time config scenarios:
+    --------------------------------
+    To convert tz-aware timestamps aligned_in_absolute_time to multiple time zones specified in a column:
+     - wrap_time_allowed = False
+     - Input time config: DatetimeRange with tz-aware start time, Timestamp_TZ dtype
+     - Output time config: DatetimeRangeWithTZColumn with tz-aware start time, Timestamp_NTZ dtype
+
+    To convert tz-aware timestamps aligned_in_absolute_time to multiple time zones specified in a column
+    and aligned_in_local_standard_time:
+     - wrap_time_allowed = True
+     - Input time config: DatetimeRange with tz-aware start time, Timestamp_TZ dtype
+     - Output time config: DatetimeRangeWithTZColumn with tz-naive start time, Timestamp_NTZ dtype
+     Note: converted time is wrapped within the local time range of the original timestamps.
+    --------------------------------
+
+    # TODO: support DatetimeRangeWithTZColumn as input time config - Issue #64
+    """
 
     def __init__(
         self,
@@ -294,16 +339,17 @@ class TimeZoneConverterByColumn(TimeZoneConverterBase):
 
     def generate_to_time_config(self) -> DatetimeRangeBase:
         assert isinstance(self._from_schema.time_config, DatetimeRange)  # mypy
-        to_time_config = self._from_schema.time_config.model_copy()
-        if self._wrap_time_allowed:
-            to_time_config.start = to_time_config.start.replace(tzinfo=None)
-        time_kwargs = to_time_config.model_dump()
+        time_kwargs = self._from_schema.time_config.model_dump()
         time_kwargs = dict(
             filter(
                 lambda k_v: k_v[0] in DatetimeRangeWithTZColumn.model_fields,
                 time_kwargs.items(),
             )
         )
+        if self._wrap_time_allowed:
+            time_kwargs["start"] = time_kwargs["start"].replace(tzinfo=None)
+
+        time_kwargs["dtype"] = TimeDataType.TIMESTAMP_NTZ
         time_kwargs["time_type"] = TimeType.DATETIME_TZ_COL
         time_kwargs["time_zone_column"] = self.time_zone_column
         time_kwargs["time_zones"] = self._get_time_zones()
@@ -376,10 +422,10 @@ class TimeZoneConverterByColumn(TimeZoneConverterBase):
 
         df_tz = []
         for tz_name, time_data in to_time_data_dct.items():
-            to_time_data: list[datetime] | list[pd.Timestamp]
+            to_time_data: list[pd.Timestamp]
             if self._wrap_time_allowed:
                 # assume it is being wrapped based on the tz-naive version of the original time data
-                final_time_data = [x.replace(tzinfo=None) for x in from_time_data]
+                final_time_data = [x.tz_localize(None) for x in from_time_data]
                 to_time_data = wrapped_time_timestamps(time_data, final_time_data)
             else:
                 to_time_data = time_data

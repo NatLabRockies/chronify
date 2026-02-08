@@ -16,18 +16,19 @@ from chronify.time_zone_converter import (
 )
 from chronify.time_configs import DatetimeRange
 from chronify.models import TableSchema
-from chronify.time import TimeIntervalType
+from chronify.time import TimeDataType, TimeIntervalType
 from chronify.datetime_range_generator import DatetimeRangeGenerator
 from chronify.exceptions import InvalidParameter
 
 
-def generate_datetime_data(time_config: DatetimeRange) -> pd.Series:  # type: ignore
-    return pd.to_datetime(list(DatetimeRangeGenerator(time_config)._iter_timestamps()))
-
-
 def generate_datetime_dataframe(schema: TableSchema) -> pd.DataFrame:
-    df = pd.DataFrame({schema.time_config.time_column: generate_datetime_data(schema.time_config)})
-
+    df = pd.DataFrame(
+        {
+            schema.time_config.time_column: pd.to_datetime(
+                DatetimeRangeGenerator(schema.time_config).list_timestamps()
+            )
+        }
+    )
     for i, x in enumerate(schema.time_array_id_columns):
         df[x] = i
     df[schema.value_column] = np.random.rand(len(df))
@@ -70,6 +71,7 @@ def get_datetime_schema(
     schema = TableSchema(
         name=name,
         time_config=DatetimeRange(
+            dtype=TimeDataType.TIMESTAMP_TZ if tzinfo else TimeDataType.TIMESTAMP_NTZ,
             start=start,
             resolution=resolution,
             length=length,
@@ -183,10 +185,8 @@ def run_conversion_with_error(
 def test_src_table_no_time_zone(iter_engines: Engine) -> None:
     from_schema = get_datetime_schema(2018, None, TimeIntervalType.PERIOD_BEGINNING, "base_table")
     df = generate_datetime_dataframe(from_schema)
-    error = (InvalidParameter, "Source schema start_time must be timezone-aware")
-    run_conversion_with_error(
-        iter_engines, df, from_schema, False, error
-    )  # TODO, support tz-naive to tz-aware conversion
+    error = (InvalidParameter, "Source schema time config start time must be timezone-aware")
+    run_conversion_with_error(iter_engines, df, from_schema, False, error)
 
 
 @pytest.mark.parametrize(

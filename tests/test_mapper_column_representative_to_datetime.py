@@ -169,7 +169,7 @@ def test_NYMDPV_mapper(time_series_NYMDPV, iter_store: Store):
         mapped_table = read_database(
             f"SELECT * FROM {to_schema.name}", conn, to_schema.time_config
         ).sort_values("timestamp")
-        values = np.concat(
+        values = np.concatenate(
             [
                 np.ones(5) * 100,
                 np.ones(7) * 200,

@@ -13,14 +13,21 @@ from collections import Counter
 import pandas as pd
 from numpy.dtypes import DateTime64DType, ObjectDType
 from pandas import DatetimeTZDtype
+from chronify.time import TimeDataType
 from sqlalchemy import Connection, Engine, Selectable, text
 
 from chronify.exceptions import InvalidOperation, InvalidParameter
-from chronify.time_configs import DatetimeRangeBase, DatetimeRange, TimeBaseModel
+from chronify.time_configs import (
+    DatetimeRangeBase,
+    TimeBaseModel,
+    DatetimeRange,
+    DatetimeRangeWithTZColumn,
+)
 from chronify.utils.path_utils import check_overwrite, delete_if_exists, to_path
 
 # Copied from Pandas/Polars
 DbWriteMode: TypeAlias = Literal["replace", "append", "fail"]
+DatetimeRangeWithDtype: TypeAlias = DatetimeRange | DatetimeRangeWithTZColumn
 
 
 def read_database(
@@ -35,7 +42,7 @@ def read_database(
                 df = conn.execute(query).cursor.fetch_df()  # type: ignore
         case "sqlite":
             df = pd.read_sql(query, conn, params=params)
-            if isinstance(config, DatetimeRange):
+            if isinstance(config, (DatetimeRange, DatetimeRangeWithTZColumn)):
                 _convert_database_output_for_datetime(df, config)
         case "hive":
             df = _read_from_hive(query, conn, config, params)
@@ -81,9 +88,9 @@ def _check_one_config_per_datetime_column(configs: Sequence[TimeBaseModel]) -> N
 
 
 def _convert_database_input_for_datetime(
-    df: pd.DataFrame, config: DatetimeRange, copied: bool
+    df: pd.DataFrame, config: DatetimeRangeWithDtype, copied: bool
 ) -> tuple[pd.DataFrame, bool]:
-    if config.start_time_is_tz_naive():
+    if config.dtype == TimeDataType.TIMESTAMP_NTZ:
         return df, copied
 
     if copied:
@@ -91,7 +98,6 @@ def _convert_database_input_for_datetime(
     else:
         df2 = df.copy()
         copied = True
-
     if isinstance(df2[config.time_column].dtype, DatetimeTZDtype):
         df2[config.time_column] = df2[config.time_column].dt.tz_convert("UTC")
     else:
@@ -100,9 +106,11 @@ def _convert_database_input_for_datetime(
     return df2, copied
 
 
-def _convert_database_output_for_datetime(df: pd.DataFrame, config: DatetimeRange) -> None:
+def _convert_database_output_for_datetime(
+    df: pd.DataFrame, config: DatetimeRangeWithDtype
+) -> None:
     if config.time_column in df.columns:
-        if not config.start_time_is_tz_naive():
+        if config.dtype == TimeDataType.TIMESTAMP_TZ:
             if isinstance(df[config.time_column].dtype, ObjectDType):
                 df[config.time_column] = pd.to_datetime(df[config.time_column], utc=True)
             else:
@@ -120,6 +128,7 @@ def _write_to_duckdb(
 ) -> None:
     assert conn._dbapi_connection is not None
     assert conn._dbapi_connection.driver_connection is not None
+
     match if_table_exists:
         case "append":
             query = f"INSERT INTO {table_name} SELECT * FROM df"
@@ -131,6 +140,7 @@ def _write_to_duckdb(
         case _:
             msg = f"{if_table_exists=}"
             raise InvalidOperation(msg)
+
     conn._dbapi_connection.driver_connection.sql(query)
 
 
@@ -190,9 +200,9 @@ def _read_from_hive(
 ) -> pd.DataFrame:
     df = pd.read_sql_query(query, conn, params=params)
     if (
-        isinstance(config, DatetimeRange)
+        isinstance(config, (DatetimeRange, DatetimeRangeWithTZColumn))
         and config.time_column in df.columns
-        and not config.start_time_is_tz_naive()
+        and config.dtype == TimeDataType.TIMESTAMP_TZ
     ):
         # This is tied to the fact that we set the Spark session to UTC.
         # Otherwise, there is confusion with the computer's local time zone.
@@ -210,7 +220,7 @@ def _write_to_sqlite(
     _check_one_config_per_datetime_column(configs)
     copied = False
     for config in configs:
-        if isinstance(config, DatetimeRange):
+        if isinstance(config, (DatetimeRange, DatetimeRangeWithTZColumn)):
             df, copied = _convert_database_input_for_datetime(df, config, copied)
     df.to_sql(table_name, conn, if_exists=if_table_exists, index=False)
 
@@ -251,7 +261,6 @@ def write_query_to_parquet(
             if not overwrite:
                 msg = "write_table_to_parquet with Hive requires overwrite=True"
                 raise InvalidOperation(msg)
-            # TODO: partition columns
             if partition_columns:
                 msg = "write_table_to_parquet with Hive doesn't support partition_columns"
                 raise InvalidOperation(msg)

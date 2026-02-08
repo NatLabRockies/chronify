@@ -35,7 +35,7 @@ dst_table_name = "ev_charging_datetime"
 hours_per_year = 12 * 7 * 24
 num_time_arrays = 3
 df = pd.DataFrame({
-    "id": np.concat([np.repeat(i, hours_per_year) for i in range(1, 1 + num_time_arrays)]),
+    "id": np.concatenate([np.repeat(i, hours_per_year) for i in range(1, 1 + num_time_arrays)]),
     "month": np.tile(np.repeat(range(1, 13), 7 * 24), num_time_arrays),
     "day_of_week": np.tile(np.tile(np.repeat(range(7), 24), 12), num_time_arrays),
     "hour": np.tile(np.tile(range(24), 12 * 7), num_time_arrays),

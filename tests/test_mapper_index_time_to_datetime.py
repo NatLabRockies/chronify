@@ -9,8 +9,7 @@ from chronify.sqlalchemy.functions import read_database, write_database
 from chronify.time_series_mapper import map_time
 from chronify.time_configs import (
     DatetimeRange,
-    IndexTimeRangeNTZ,
-    IndexTimeRangeTZ,
+    IndexTimeRange,
     IndexTimeRangeWithTZColumn,
     TimeBasedDataAdjustment,
 )
@@ -57,23 +56,18 @@ def data_for_simple_mapping(
     src_df = pd.DataFrame({"index_time": range(1, nts + 1), "value": range(1, nts + 1)})
 
     if tz_naive:
-        time_config = IndexTimeRangeNTZ(
-            start=1,
-            length=nts,
-            start_timestamp=start_timestamp,
-            resolution=interval_resolution,
-            interval_type=TimeIntervalType.PERIOD_BEGINNING,
-            time_column="index_time",
-        )
+        st_ts = start_timestamp
     else:
-        time_config = IndexTimeRangeTZ(
-            start=1,
-            length=nts,
-            start_timestamp=start_timestamp.tz_localize("US/Mountain"),
-            resolution=interval_resolution,
-            interval_type=TimeIntervalType.PERIOD_BEGINNING,
-            time_column="index_time",
-        )
+        st_ts = start_timestamp.tz_localize("US/Mountain")
+
+    time_config = IndexTimeRange(
+        start=1,
+        length=nts,
+        start_timestamp=st_ts,
+        resolution=interval_resolution,
+        interval_type=TimeIntervalType.PERIOD_BEGINNING,
+        time_column="index_time",
+    )
     src_schema = TableSchema(
         name="input_data",
         time_config=time_config,

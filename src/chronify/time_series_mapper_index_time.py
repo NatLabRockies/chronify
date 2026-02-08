@@ -19,7 +19,7 @@ from chronify.time_configs import (
 )
 from chronify.time_range_generator_factory import make_time_range_generator
 from chronify.time_series_mapper_datetime import MapperDatetimeToDatetime
-from chronify.time import TimeType, DaylightSavingAdjustmentType, AggregationType
+from chronify.time import TimeDataType, TimeType, DaylightSavingAdjustmentType, AggregationType
 from chronify.sqlalchemy.functions import read_database
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,7 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
         data_adjustment: Optional[TimeBasedDataAdjustment] = None,
         wrap_time_allowed: bool = False,
     ) -> None:
+        # TODO: refactor to use new time configs - Issue #64
         super().__init__(
             engine, metadata, from_schema, to_schema, data_adjustment, wrap_time_allowed
         )
@@ -181,7 +182,7 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
         return time_config
 
     def _create_interm_map(self) -> tuple[pd.DataFrame, MappingTableSchema, TableSchema]:
-        """Create mapping dataframe for converting INDEX_TZ or INDEX_NTZ time to its represented datetime"""
+        """Create mapping dataframe for converting INDEX time to its represented datetime"""
         mapped_schema = self._create_intermediate_schema()
         assert isinstance(mapped_schema.time_config, DatetimeRange)
         mapped_time_col = mapped_schema.time_config.time_column
@@ -195,7 +196,6 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
             name="mapping_table",
             time_configs=[from_time_config, mapped_schema.time_config],
         )
-
         df = pd.DataFrame(
             {
                 from_time_col: from_time_data,
@@ -251,6 +251,7 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
         # Update mapped_schema
         mapped_schema.time_config.start = df[mapped_time_col].min()
         mapped_schema.time_config.length = df[mapped_time_col].nunique()
+        mapped_schema.time_config.dtype = TimeDataType.TIMESTAMP_TZ
 
         mapping_schema = MappingTableSchema(
             name="mapping_table_index_time",
@@ -316,6 +317,7 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
         # Update mapped_schema
         mapped_schema.time_config.start = df[mapped_time_col].min()
         mapped_schema.time_config.length = df[mapped_time_col].nunique()
+        mapped_schema.time_config.dtype = TimeDataType.TIMESTAMP_TZ
 
         mapping_schema = MappingTableSchema(
             name="mapping_table_index_time_with_dst_adjustment",

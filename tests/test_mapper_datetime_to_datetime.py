@@ -22,8 +22,8 @@ from chronify.time_utils import (
 )
 
 
-def generate_datetime_data(time_config: DatetimeRange) -> pd.Series:  # type: ignore
-    return pd.to_datetime(list(DatetimeRangeGenerator(time_config)._iter_timestamps()))
+def generate_datetime_data(time_config: DatetimeRange) -> pd.DatetimeIndex:  # type: ignore
+    return pd.to_datetime(DatetimeRangeGenerator(time_config).list_timestamps())
 
 
 def generate_datetime_dataframe(schema: TableSchema) -> pd.DataFrame:
@@ -194,7 +194,7 @@ def test_time_interval_shift_different_time_ranges(
     "tzinfo_tuple",
     [
         # (ZoneInfo("US/Eastern"), None),
-        (None, ZoneInfo("EST")),
+        (None, ZoneInfo("Etc/GMT+5")),
         # (ZoneInfo("US/Eastern"), ZoneInfo("US/Mountain")),
     ],
 )
