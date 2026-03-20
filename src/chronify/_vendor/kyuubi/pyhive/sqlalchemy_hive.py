@@ -145,6 +145,7 @@ _type_map = {
     'char': types.String,
     'date': HiveDate,
     'timestamp': HiveTimestamp,
+    'timestamp_ntz': HiveTimestamp,
     'binary': types.String,
     'array': types.String,
     'map': types.String,
