@@ -6,7 +6,8 @@ from typing import Any, Optional
 
 import pandas as pd
 from loguru import logger
-from sqlalchemy import Engine, MetaData, Table, select, text, func
+from sqlalchemy import Engine, MetaData, Table, select, text, func, cast
+from sqlalchemy.types import TIMESTAMP
 from chronify.hive_functions import create_materialized_view
 
 from chronify.sqlalchemy.functions import (
@@ -18,7 +19,7 @@ from chronify.models import TableSchema, MappingTableSchema
 from chronify.exceptions import ConflictingInputsError, InvalidOperation
 from chronify.utils.sqlalchemy_table import create_table
 from chronify.time_series_checker import check_timestamps
-from chronify.time import TimeIntervalType, ResamplingOperationType, AggregationType
+from chronify.time import TimeDataType, TimeIntervalType, ResamplingOperationType, AggregationType
 from chronify.time_configs import TimeBasedDataAdjustment
 from chronify.utils.path_utils import to_path
 
@@ -189,7 +190,15 @@ def _apply_mapping(
     left_cols = final_cols - right_cols - {val_col}
 
     select_stmt: list[Any] = [left_table.c[x] for x in left_cols]
-    select_stmt += [right_table.c[x] for x in right_cols]
+    for x in right_cols:
+        col = right_table.c[x]
+        if (
+            engine.name == "hive"
+            and x == to_schema.time_config.time_column
+            and to_schema.time_config.dtype == TimeDataType.TIMESTAMP_TZ
+        ):
+            col = cast(col, TIMESTAMP).label(x)
+        select_stmt.append(col)
 
     tval_col = left_table.c[val_col]
     if "factor" in right_table_columns:
