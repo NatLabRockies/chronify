@@ -2,11 +2,13 @@
 
 from calendar import isleap
 import logging
-from numpy.typing import NDArray
-import numpy as np
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone, tzinfo
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from chronify.time import (
     LeapDayAdjustmentType,
@@ -32,7 +34,7 @@ def adjust_timestamp_by_dst_offset(timestamp: datetime, resolution: timedelta) -
 
 
 def shifted_interval_timestamps(
-    ts_list: list[pd.Timestamp],
+    ts_list: Sequence[datetime],
     from_interval_type: TimeIntervalType,
     to_interval_type: TimeIntervalType,
 ) -> list[pd.Timestamp]:
@@ -75,9 +77,9 @@ def shifted_interval_timestamps(
 
 
 def wrapped_time_timestamps(
-    ts_list: list[pd.Timestamp],
-    to_timestamps: list[pd.Timestamp],
-) -> list[pd.Timestamp]:
+    ts_list: Sequence[datetime],
+    to_timestamps: Sequence[datetime],
+) -> list[datetime]:
     """Returns the replacement timestamps in order to wrap the ts_list into the to_timestamps range.
 
     Example:
@@ -110,11 +112,11 @@ def wrapped_time_timestamps(
 
 
 def rolled_interval_timestamps(
-    ts_list: list[pd.Timestamp],
+    ts_list: Sequence[datetime],
     from_interval_type: TimeIntervalType,
     to_interval_type: TimeIntervalType,
-    to_timestamps: list[pd.Timestamp],
-) -> list[pd.Timestamp]:
+    to_timestamps: Sequence[datetime],
+) -> list[datetime]:
     """Roll ts_list by shifting time interval based on interval type and then
     wrapping timestamps according to to_timestamps.
 

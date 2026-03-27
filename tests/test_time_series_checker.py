@@ -4,67 +4,63 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
-from sqlalchemy import (
-    Engine,
-    MetaData,
-    Table,
-)
+
+from chronify.ibis.backend import IbisBackend
+from chronify.ibis.functions import write_table
 from chronify.exceptions import InvalidTable
 from chronify.models import TableSchema
-from chronify.sqlalchemy.functions import write_database
 from chronify.time import TimeIntervalType
 from chronify.time_configs import DatetimeRange
 from chronify.time_series_checker import check_timestamps
 
 
-def test_valid_datetimes_with_tz(iter_engines: Engine) -> None:
+def test_valid_datetimes_with_tz(iter_backends: IbisBackend) -> None:
     """Valid timestamps with time zones."""
-    _run_test(iter_engines, *_get_inputs_for_valid_datetimes_with_tz())
+    _run_test(iter_backends, *_get_inputs_for_valid_datetimes_with_tz())
 
 
-def test_valid_datetimes_without_tz(iter_engines: Engine) -> None:
+def test_valid_datetimes_without_tz(iter_backends: IbisBackend) -> None:
     """Valid timestamps without time zones."""
-    _run_test(iter_engines, *_get_inputs_for_valid_datetimes_without_tz())
+    _run_test(iter_backends, *_get_inputs_for_valid_datetimes_without_tz())
 
 
-def test_invalid_datetimes(iter_engines: Engine) -> None:
+def test_invalid_datetimes(iter_backends: IbisBackend) -> None:
     """Timestamps do not match the schema."""
-    _run_test(iter_engines, *_get_inputs_for_incorrect_datetimes())
+    _run_test(iter_backends, *_get_inputs_for_incorrect_datetimes())
 
 
-def test_invalid_datetime_length(iter_engines: Engine) -> None:
+def test_invalid_datetime_length(iter_backends: IbisBackend) -> None:
     """Timestamps do not match the schema."""
-    _run_test(iter_engines, *_get_inputs_for_incorrect_datetime_length())
+    _run_test(iter_backends, *_get_inputs_for_incorrect_datetime_length())
 
 
-def test_mismatched_time_array_lengths(iter_engines: Engine) -> None:
+def test_mismatched_time_array_lengths(iter_backends: IbisBackend) -> None:
     """Some time arrays have different lengths."""
-    _run_test(iter_engines, *_get_inputs_for_mismatched_time_array_lengths())
+    _run_test(iter_backends, *_get_inputs_for_mismatched_time_array_lengths())
 
 
-def test_incorrect_lengths(iter_engines: Engine) -> None:
+def test_incorrect_lengths(iter_backends: IbisBackend) -> None:
     """All time arrays are consistent but have the wrong length."""
-    _run_test(iter_engines, *_get_inputs_for_incorrect_lengths())
+    _run_test(iter_backends, *_get_inputs_for_incorrect_lengths())
 
 
-def test_incorrect_time_arrays(iter_engines: Engine) -> None:
+def test_incorrect_time_arrays(iter_backends: IbisBackend) -> None:
     """The time arrays form a complete set but are individually incorrect."""
-    _run_test(iter_engines, *_get_inputs_for_incorrect_time_arrays())
+    _run_test(iter_backends, *_get_inputs_for_incorrect_time_arrays())
 
 
-def test_incorrect_time_arrays_with_duplicates(iter_engines: Engine) -> None:
+def test_incorrect_time_arrays_with_duplicates(iter_backends: IbisBackend) -> None:
     """The time arrays form a complete set but are individually incorrect."""
-    _run_test(iter_engines, *_get_inputs_for_incorrect_time_arrays_with_duplicates())
+    _run_test(iter_backends, *_get_inputs_for_incorrect_time_arrays_with_duplicates())
 
 
 def _run_test(
-    engine: Engine,
+    backend: IbisBackend,
     df: pd.DataFrame,
     tzinfo: Optional[tzinfo],
     length: int,
     message: Optional[str],
 ) -> None:
-    metadata = MetaData()
     schema = TableSchema(
         name="generators",
         time_config=DatetimeRange(
@@ -77,17 +73,14 @@ def _run_test(
         time_array_id_columns=["generator"],
         value_column="value",
     )
-    with engine.begin() as conn:
-        write_database(df, conn, schema.name, [schema.time_config], if_table_exists="replace")
-    metadata.reflect(engine)
+    write_table(backend, df, schema.name, [schema.time_config], if_exists="replace")
 
-    with engine.connect() as conn:
-        table = Table(schema.name, metadata)
-        if message is None:
-            check_timestamps(conn, table, schema)
-        else:
-            with pytest.raises(InvalidTable, match=message):
-                check_timestamps(conn, table, schema)
+    table = backend.table(schema.name)
+    if message is None:
+        check_timestamps(backend, table, schema)
+    else:
+        with pytest.raises(InvalidTable, match=message):
+            check_timestamps(backend, table, schema)
 
 
 def _get_inputs_for_valid_datetimes_with_tz() -> tuple[pd.DataFrame, ZoneInfo, int, None]:

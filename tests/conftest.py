@@ -1,94 +1,90 @@
-import os
-from typing import Any, Generator
+from typing import Generator
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+
 import numpy as np
 import pandas as pd
 import pytest
+from pyspark.sql import SparkSession
 
-from sqlalchemy import Engine, create_engine, text
-
+from chronify.ibis.backend import IbisBackend, make_backend
 from chronify.models import TableSchema
 from chronify.store import Store
 from chronify.time import RepresentativePeriodFormat
 from chronify.time_configs import RepresentativePeriodTimeNTZ, RepresentativePeriodTimeTZ
 
 
-ENGINES: dict[str, dict[str, Any]] = {
-    "duckdb": {"url": "duckdb:///:memory:", "connect_args": {}, "kwargs": {}},
-    "sqlite": {"url": "sqlite:///:memory:", "connect_args": {}, "kwargs": {}},
-}
-HIVE_URL = os.getenv("CHRONIFY_HIVE_URL")
-if HIVE_URL is not None:
-    ENGINES["hive"] = {"url": HIVE_URL, "connect_args": {}, "kwargs": {}}
+BACKENDS = ("duckdb", "sqlite", "spark")
 
 
 @pytest.fixture
-def create_duckdb_engine() -> Engine:
-    """Return a sqlalchemy engine for DuckDB."""
-    return create_engine("duckdb:///:memory:")
+def create_duckdb_backend() -> IbisBackend:
+    """Return an Ibis backend for DuckDB."""
+    return make_backend("duckdb")
 
 
-@pytest.fixture(params=[x for x in ENGINES.keys() if x != "hive"])
-def iter_engines(request) -> Generator[Engine, None, None]:
-    """Return an iterable of sqlalchemy in-memory engines to test."""
-    engine = ENGINES[request.param]
-    yield create_engine(engine["url"], *engine["connect_args"], **engine["kwargs"])
+@pytest.fixture(params=[x for x in BACKENDS if x != "spark"])
+def iter_backends(request) -> Generator[IbisBackend, None, None]:
+    """Return an iterable of Ibis backends to test."""
+    yield make_backend(request.param)
 
 
-@pytest.fixture(params=[x for x in ENGINES.keys() if x != "hive"])
-def iter_stores_by_engine(request) -> Generator[Store, None, None]:
-    """Return an iterable of stores with different engines to test.
-    Will only return engines that support data ingestion.
+@pytest.fixture(params=[x for x in BACKENDS if x != "spark"])
+def iter_stores_by_backend(request) -> Generator[Store, None, None]:
+    """Return an iterable of stores with different backends to test.
+    Will only return backends that support data ingestion.
     """
-    engine = ENGINES[request.param]
-    engine = create_engine(engine["url"], *engine["connect_args"], **engine["kwargs"])
-    store = Store(engine=engine)
+    backend = request.param
+    store = Store(backend_name=backend)
     yield store
     store.dispose()
 
 
-@pytest.fixture(params=ENGINES.keys())
-def iter_stores_by_engine_no_data_ingestion(request) -> Generator[Store, None, None]:
-    """Return an iterable of stores with different engines to test."""
-    engine = ENGINES[request.param]
-    if engine["url"].startswith("hive"):
-        store = Store.create_new_hive_store(
-            engine["url"], *engine["connect_args"], drop_schema=True, **engine["kwargs"]
+@pytest.fixture(params=BACKENDS)
+def iter_stores_by_backend_no_data_ingestion(request, tmp_path) -> Generator[Store, None, None]:
+    """Return an iterable of stores with different backends to test."""
+    backend = request.param
+    orig_tables_and_views: set[str] | None = set()
+    if backend == "spark":
+        # Use a temp directory for the spark warehouse to avoid conflicts
+        warehouse_dir = tmp_path / "spark-warehouse"
+        spark = (
+            SparkSession.builder.appName("chronify_test")
+            .config("spark.sql.warehouse.dir", str(warehouse_dir))
+            .getOrCreate()
         )
-        orig_tables_and_views = set()
-        with store.engine.begin() as conn:
-            for row in conn.execute(text("SHOW TABLES")).all():
-                orig_tables_and_views.add(row[1])
+        store = Store.create_new_spark_store(session=spark)
+        for name in store._backend.list_tables():
+            orig_tables_and_views.add(name)
     else:
-        eng = create_engine(engine["url"], *engine["connect_args"], **engine["kwargs"])
-        store = Store(engine=eng)
+        store = Store(backend_name=backend)
         orig_tables_and_views = None
     yield store
-    if engine["url"].startswith("hive"):
-        with store.engine.begin() as conn:
-            for row in conn.execute(text("SHOW VIEWS")).all():
-                name = row[1]
-                if name not in orig_tables_and_views:
-                    conn.execute(text(f"DROP VIEW {name}"))
-            for row in conn.execute(text("SHOW TABLES")).all():
-                name = row[1]
-                if name not in orig_tables_and_views:
-                    conn.execute(text(f"DROP TABLE {name}"))
+    if backend == "spark" and orig_tables_and_views is not None:
+        # Cleanup views and tables created during test
+        for name in store._backend.list_tables():
+            if name not in orig_tables_and_views:
+                try:
+                    store._backend.drop_view(name, if_exists=True)
+                except Exception:
+                    pass
+                try:
+                    store._backend.drop_table(name, if_exists=True)
+                except Exception:
+                    pass
 
 
-@pytest.fixture(params=[x for x in ENGINES.keys() if x != "hive"])
-def iter_engines_file(request, tmp_path) -> Generator[Engine, None, None]:
-    """Return an iterable of sqlalchemy file-based engines to test."""
-    engine = ENGINES[request.param]
+@pytest.fixture(params=[x for x in BACKENDS if x != "spark"])
+def iter_backends_file(request, tmp_path) -> Generator[IbisBackend, None, None]:
+    """Return an iterable of Ibis file-based backends to test."""
+    backend = request.param
     file_path = tmp_path / "store.db"
-    url = engine["url"].replace(":memory:", str(file_path))
-    yield create_engine(url, *engine["connect_args"], **engine["kwargs"])
+    yield make_backend(backend, file_path=file_path)
 
 
-@pytest.fixture(params=[x for x in ENGINES.keys() if x != "hive"])
-def iter_engine_names(request) -> Generator[str, None, None]:
-    """Return an iterable of engine names."""
+@pytest.fixture(params=[x for x in BACKENDS if x != "spark"])
+def iter_backend_names(request) -> Generator[str, None, None]:
+    """Return an iterable of backend names."""
     yield request.param
 
 

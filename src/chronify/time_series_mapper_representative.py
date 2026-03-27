@@ -3,9 +3,9 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
-from sqlalchemy import Engine, MetaData, Table, select
 
-from chronify.sqlalchemy.functions import read_database
+from chronify.ibis.backend import IbisBackend
+from chronify.ibis.functions import read_query
 from chronify.models import TableSchema, MappingTableSchema
 from chronify.exceptions import (
     InvalidParameter,
@@ -27,16 +27,13 @@ logger = logging.getLogger(__name__)
 class MapperRepresentativeTimeToDatetime(TimeSeriesMapperBase):
     def __init__(
         self,
-        engine: Engine,
-        metadata: MetaData,
+        backend: IbisBackend,
         from_schema: TableSchema,
         to_schema: TableSchema,
         data_adjustment: Optional[TimeBasedDataAdjustment] = None,
         wrap_time_allowed: bool = False,
     ) -> None:
-        super().__init__(
-            engine, metadata, from_schema, to_schema, data_adjustment, wrap_time_allowed
-        )
+        super().__init__(backend, from_schema, to_schema, data_adjustment, wrap_time_allowed)
         if not isinstance(from_schema.time_config, RepresentativePeriodTimeBase):
             msg = "source schema does not have RepresentativePeriodTimeBase time config. Use a different mapper."
             raise InvalidParameter(msg)
@@ -69,8 +66,7 @@ class MapperRepresentativeTimeToDatetime(TimeSeriesMapperBase):
             mapping_schema,
             self._from_schema,
             self._to_schema,
-            self._engine,
-            self._metadata,
+            self._backend,
             self._data_adjustment,
             scratch_dir=scratch_dir,
             output_file=output_file,
@@ -107,10 +103,9 @@ class MapperRepresentativeTimeToDatetime(TimeSeriesMapperBase):
         else:
             tz_col = self._from_time_config.get_time_zone_column()
             assert tz_col is not None, "Expecting a time zone column for REPRESENTATIVE time"
-            with self._engine.connect() as conn:
-                table = Table(self._from_schema.name, self._metadata)
-                stmt = select(table.c[tz_col]).distinct().where(table.c[tz_col].is_not(None))
-                time_zones = read_database(stmt, conn, self._from_time_config)[tz_col].to_list()
+            table = self._backend.table(self._from_schema.name)
+            query = table.select(table[tz_col]).distinct().filter(table[tz_col].notnull())
+            time_zones = read_query(self._backend, query, self._from_time_config)[tz_col].to_list()
             df = self._generator.create_tz_aware_mapping_dataframe(
                 dft, time_col, time_zones, tz_col
             )

@@ -2,26 +2,14 @@ from collections.abc import Iterable
 from pathlib import Path
 import shutil
 from typing import Any, Optional
-from chronify.utils.sql import make_temp_view_name
 from datetime import tzinfo
 
 import duckdb
 import pandas as pd
 from duckdb import DuckDBPyRelation
 from loguru import logger
-from sqlalchemy import (
-    Column,
-    Connection,
-    Engine,
-    MetaData,
-    Selectable,
-    Table,
-    create_engine,
-    delete,
-    func,
-    select,
-    text,
-)
+import ibis.expr.types as ir
+import pyarrow as pa
 
 import chronify.duckdb.functions as ddbf
 from chronify.exceptions import (
@@ -33,18 +21,17 @@ from chronify.exceptions import (
     TableNotStored,
 )
 from chronify.csv_io import read_csv
+from chronify.ibis.backend import IbisBackend, make_backend
+from chronify.ibis.functions import (
+    create_view_from_parquet,
+    read_query,
+    write_parquet,
+    write_table,
+)
 from chronify.models import (
     CsvTableSchema,
     PivotedTableSchema,
     TableSchema,
-    get_duckdb_types_from_pandas,
-    get_sqlalchemy_type_from_duckdb,
-)
-from chronify.sqlalchemy.functions import (
-    create_view_from_parquet,
-    read_database,
-    write_database,
-    write_query_to_parquet,
 )
 from chronify.schema_manager import SchemaManager
 from chronify.time_configs import DatetimeRange, IndexTimeRangeBase, TimeBasedDataAdjustment
@@ -53,7 +40,6 @@ from chronify.time_series_mapper import map_time
 from chronify.time_zone_converter import TimeZoneConverter, TimeZoneConverterByColumn
 from chronify.time_zone_localizer import TimeZoneLocalizer, TimeZoneLocalizerByColumn
 from chronify.utils.path_utils import check_overwrite, to_path
-from chronify.utils.sqlalchemy_view import create_view
 
 
 class Store:
@@ -61,8 +47,8 @@ class Store:
 
     def __init__(
         self,
-        engine: Optional[Engine] = None,
-        engine_name: Optional[str] = None,
+        backend: Optional[IbisBackend] = None,
+        backend_name: Optional[str] = None,
         file_path: Optional[Path | str] = None,
         **connect_kwargs: Any,
     ) -> None:
@@ -70,10 +56,11 @@ class Store:
 
         Parameters
         ----------
-        engine
-            Optional, defaults to a engine connected to an in-memory DuckDB database.
-        engine_name
-            Optional, name of engine to use ('duckdb', 'sqlite'). Mutually exclusive with engine.
+        backend
+            Optional, an IbisBackend instance. Defaults to a DuckDB in-memory backend.
+        backend_name
+            Optional, name of backend to use ('duckdb', 'sqlite', 'spark').
+            Mutually exclusive with backend.
         file_path
             Optional, use this file for the database. If the file does not exist, create a new
             database. If the file exists, load that existing database.
@@ -81,109 +68,84 @@ class Store:
 
         Examples
         --------
-        >>> from sqlalchemy
         >>> store1 = Store()
-        >>> store2 = Store(engine=Engine("duckdb:///time_series.db"))
-        >>> store3 = Store(engine=Engine("sqlite:///time_series.db"))
-        >>> store4 = Store(engine_name="sqlite")
+        >>> store2 = Store(backend_name="duckdb", file_path="time_series.db")
+        >>> store3 = Store(backend_name="sqlite", file_path="time_series.db")
+        >>> store4 = Store(backend=make_backend("duckdb"))
         """
-        self._metadata = MetaData()
-        if engine and engine_name:
-            msg = f"{engine=} and {engine_name=} cannot both be set"
+        if backend and backend_name:
+            msg = f"{backend=} and {backend_name=} cannot both be set"
             raise ConflictingInputsError(msg)
-        filename = ":memory:" if file_path is None else str(file_path)
-        if engine is None:
-            name = engine_name or "duckdb"
-            match name:
-                case "duckdb" | "sqlite":
-                    engine_path = f"{name}:///{filename}"
-                case _:
-                    msg = f"{engine_name=}"
-                    raise NotImplementedError(msg)
-            self._engine = create_engine(engine_path, **connect_kwargs)
-        else:
-            self._engine = engine
 
-        self._schema_mgr = SchemaManager(self._engine, self._metadata)
-        if self._engine.url.database != ":memory:":
-            self.update_metadata()
+        if backend is None:
+            name = backend_name or "duckdb"
+            self._backend = make_backend(name, file_path=file_path, **connect_kwargs)
+        else:
+            self._backend = backend
+
+        self._schema_mgr = SchemaManager(self._backend)
 
     @classmethod
     def create_in_memory_db(
         cls,
-        engine_name: str = "duckdb",
+        backend_name: str = "duckdb",
         **connect_kwargs: Any,
     ) -> "Store":
         """Create a Store with an in-memory database."""
-        return Store(engine=create_engine(f"{engine_name}:///:memory:", **connect_kwargs))
+        return Store(backend=make_backend(backend_name, **connect_kwargs))
 
     @classmethod
     def create_file_db(
         cls,
         file_path: Path | str = "time_series.db",
-        engine_name: str = "duckdb",
+        backend_name: str = "duckdb",
         overwrite: bool = False,
         **connect_kwargs: Any,
     ) -> "Store":
         """Create a Store with a file-based database."""
         path = to_path(file_path)
         check_overwrite(path, overwrite)
-        return Store(engine=create_engine(f"{engine_name}:///{path}", **connect_kwargs))
+        return Store(backend=make_backend(backend_name, file_path=path, **connect_kwargs))
 
     @classmethod
-    def create_new_hive_store(
+    def create_new_spark_store(
         cls,
-        url: str,
+        session: Any = None,
         drop_schema: bool = True,
         **connect_kwargs: Any,
     ) -> "Store":
-        """Create a new Store in a Hive database.
+        """Create a new Store with Spark backend.
+
         Recommended usage is to create views from Parquet files. Ingesting data into tables
         from files or DataFrames is not supported.
 
-        This has been tested with Apache Spark running an Apache Thrift Server.
-
         Parameters
         ----------
-        url
-            Thrift server URL
+        session
+            Optional SparkSession. If None, a new one will be created.
         drop_schema
             If True, drop the schema table if it's already there.
 
         Examples
         --------
-        >>> store = Store.create_new_hive_store("hive://localhost:10000/default")
+        >>> store = Store.create_new_spark_store()
 
         See also
         --------
         create_view_from_parquet
         """
-        # We don't currently expect to need to load an existing hive-based store, but it could
-        # be added.
-        if "hive://" not in url:
-            msg = f"Expected 'hive://' to be in url: {url}"
-            raise InvalidParameter(msg)
-        engine = create_engine(url, **connect_kwargs)
-        metadata = MetaData()
-        metadata.reflect(engine, views=True)
-        with engine.begin() as conn:
-            # Workaround for ambiguity of time zones in the read path.
-            conn.execute(text("SET TIME ZONE 'UTC'"))
-            # Workaround for the fact that Spark uses a non-standard format for timestamps
-            # in Parquet files. Pandas/DuckDB can't interpret them properly.
-            conn.execute(text("SET spark.sql.parquet.outputTimestampType=TIMESTAMP_MICROS"))
+        backend = make_backend("spark", session=session, **connect_kwargs)
 
-            if drop_schema:
-                if SchemaManager.SCHEMAS_TABLE in metadata.tables:
-                    conn.execute(text(f"DROP TABLE {SchemaManager.SCHEMAS_TABLE}"))
+        if drop_schema and SchemaManager.SCHEMAS_TABLE in backend.list_tables():
+            backend.drop_table(SchemaManager.SCHEMAS_TABLE)
 
-        return cls(engine=engine)
+        return cls(backend=backend)
 
     @classmethod
     def load_from_file(
         cls,
         file_path: Path | str,
-        engine_name: str = "duckdb",
+        backend_name: str = "duckdb",
         **connect_kwargs: Any,
     ) -> "Store":
         """Load an existing store from a database."""
@@ -191,83 +153,65 @@ class Store:
         if not path.exists():
             msg = str(path)
             raise FileNotFoundError(msg)
-        return Store(engine=create_engine(f"{engine_name}:///{path}", **connect_kwargs))
+        return Store(backend=make_backend(backend_name, file_path=path, **connect_kwargs))
 
     def dispose(self) -> None:
-        """Call self.engine.dispose() in order to dispose of the current connections."""
-        self._engine.dispose()
+        """Clean up the backend connection."""
+        self._backend.dispose()
 
-    def get_table(self, name: str) -> Table:
-        """Return the sqlalchemy Table object."""
+    def get_table(self, name: str) -> ir.Table:
+        """Return the Ibis table reference."""
         if not self.has_table(name):
             msg = f"{name=}"
             raise TableNotStored(msg)
 
-        return Table(name, self._metadata)
+        return self._backend.table(name)
 
     def has_table(self, name: str) -> bool:
         """Return True if the database has a table with the given name."""
-        return name in self._metadata.tables
+        return self._backend.has_table(name)
 
     def list_tables(self) -> list[str]:
         """Return a list of user tables in the database."""
-        return [x for x in self._metadata.tables if x != SchemaManager.SCHEMAS_TABLE]
+        return [x for x in self._backend.list_tables() if x != SchemaManager.SCHEMAS_TABLE]
 
-    def try_get_table(self, name: str) -> Table | None:
-        """Return the sqlalchemy Table object or None if it is not stored."""
+    def try_get_table(self, name: str) -> ir.Table | None:
+        """Return the Ibis table object or None if it is not stored."""
         if not self.has_table(name):
             return None
-        return Table(name, self._metadata)
-
-    def update_metadata(self) -> None:
-        """Update the sqlalchemy metadata for table schema. Call this method if you add tables
-        in the sqlalchemy engine outside of this class or perform a rollback
-        in the same transaction in which chronify added tables.
-        """
-        # Create a new object because sqlalchemy does not detect dropped tables in reflect.
-        metadata = MetaData()
-        metadata.reflect(self._engine, views=True)
-        logger.trace(
-            "Updated metadata, added: {}, dropped: {}",
-            sorted(set(metadata.tables).difference(self._metadata.tables)),
-            sorted(set(self._metadata.tables).difference(metadata.tables)),
-        )
-        self._metadata = metadata
-        self._schema_mgr.rebuild_cache()
+        return self._backend.table(name)
 
     def backup(self, dst: Path | str, overwrite: bool = False) -> None:
         """Copy the database to a new location. Not yet supported for in-memory databases."""
-        self._engine.dispose()
+        self._backend.dispose()
         path = to_path(dst)
         check_overwrite(path, overwrite)
-        match self._engine.name:
-            case "duckdb" | "sqlite":
-                if self._engine.url.database is None or self._engine.url.database == ":memory:":
-                    msg = "backup is only supported with a database backed by a file"
-                    raise InvalidOperation(msg)
-                src_file = Path(self._engine.url.database)
-                shutil.copyfile(src_file, path)
-                logger.info("Copied database to {}", path)
-            case _:
-                msg = self._engine.name
-                raise NotImplementedError(msg)
+        try:
+            match self._backend.name:
+                case "duckdb" | "sqlite":
+                    if self._backend.database is None:
+                        msg = "backup is only supported with a database backed by a file"
+                        raise InvalidOperation(msg)
+                    src_file = Path(self._backend.database)
+                    shutil.copyfile(src_file, path)
+                    logger.info("Copied database to {}", path)
+                case _:
+                    msg = self._backend.name
+                    raise NotImplementedError(msg)
+        finally:
+            self._backend.reconnect()
 
     @property
-    def engine(self) -> Engine:
-        """Return the sqlalchemy engine."""
-        return self._engine
-
-    @property
-    def metadata(self) -> MetaData:
-        """Return the sqlalchemy metadata."""
-        return self._metadata
+    def backend(self) -> IbisBackend:
+        """Return the Ibis backend."""
+        return self._backend
 
     @property
     def schema_manager(self) -> SchemaManager:
         """Return the store's schema manager."""
         return self._schema_mgr
 
-    def check_timestamps(self, name: str, connection: Connection | None = None) -> None:
+    def check_timestamps(self, name: str) -> None:
         """Check the timestamps in the table.
 
         This is useful if you call a :meth:`ingest_table` many times with skip_time_checks=True
@@ -285,25 +229,18 @@ class Store:
         """
         table = self.get_table(name)
         schema = self._schema_mgr.get_schema(name)
-        if connection is None:
-            with self._engine.connect() as conn:
-                check_timestamps(conn, table, schema)
-        else:
-            check_timestamps(connection, table, schema)
+        check_timestamps(self._backend, table, schema)
 
     def create_view_from_parquet(
         self, path: Path, schema: TableSchema, bypass_checks: bool = False
     ) -> None:
-        """Load a table into the database."""
+        """Load a table into the database from a Parquet file."""
         self._create_view_from_parquet(path, schema)
         try:
-            with self._engine.connect() as conn:
-                table = self.get_table(schema.name)
-                if not bypass_checks:
-                    check_timestamps(conn, table, schema)
+            table = self.get_table(schema.name)
+            if not bypass_checks:
+                check_timestamps(self._backend, table, schema)
         except InvalidTable:
-            # This doesn't use conn.rollback because we can't update the sqlalchemy metadata
-            # for this view inside the connection.
             self.drop_view(schema.name)
             raise
 
@@ -340,18 +277,14 @@ class Store:
         ...     "table.parquet",
         ... )
         """
-        with self._engine.begin() as conn:
-            create_view_from_parquet(conn, schema.name, to_path(path))
-            self._schema_mgr.add_schema(conn, schema)
-
-        self.update_metadata()
+        create_view_from_parquet(self._backend, schema.name, to_path(path))
+        self._schema_mgr.add_schema(schema)
 
     def ingest_from_csv(
         self,
         path: Path | str,
         src_schema: CsvTableSchema,
         dst_schema: TableSchema,
-        connection: Optional[Connection] = None,
     ) -> bool:
         """Ingest data from a CSV file.
 
@@ -363,8 +296,6 @@ class Store:
             Defines the schema of the source file.
         dst_schema
             Defines the destination table in the database.
-        connection
-            Optional connection to reuse. Refer to :meth:`ingest_table` for notes.
 
         Returns
         -------
@@ -405,14 +336,13 @@ class Store:
         --------
         ingest_from_csvs
         """
-        return self.ingest_from_csvs((path,), src_schema, dst_schema, connection=connection)
+        return self.ingest_from_csvs((path,), src_schema, dst_schema)
 
     def ingest_from_csvs(
         self,
         paths: Iterable[Path | str],
         src_schema: CsvTableSchema,
         dst_schema: TableSchema,
-        connection: Optional[Connection] = None,
     ) -> bool:
         """Ingest data into the table specifed by schema. If the table does not exist,
         create it. This is faster than calling :meth:`ingest_from_csv` many times.
@@ -422,14 +352,12 @@ class Store:
 
         Parameters
         ----------
-        path
+        paths
             Source data files
         src_schema
             Defines the schema of the source files.
         dst_schema
             Defines the destination table in the database.
-        conn
-            Optional connection to reuse. Refer to :meth:`ingest_table` for notes.
 
         Returns
         -------
@@ -446,46 +374,33 @@ class Store:
         ingest_from_csv
         """
         try:
-            if connection is None:
-                with self._engine.begin() as conn:
-                    created_table = self._ingest_from_csvs(conn, paths, src_schema, dst_schema)
-            else:
-                created_table = self._ingest_from_csvs(connection, paths, src_schema, dst_schema)
+            created_table = self._ingest_from_csvs(paths, src_schema, dst_schema)
         except Exception:
-            # TODO:
-            # 1. The implicit rollback does not remove tables from our sqlalchemy metadata object.
-            #    This means that the metadata object could be out-of-date if the user
-            #    is self-managing the connection.
-            # 2. Python sqlite3 does not appear to support rollbacks with DDL statements.
-            #    See discussion at https://bugs.python.org/issue10740.
-            self._handle_sqlite_error_case(dst_schema.name, connection)
-            if dst_schema.name in self._metadata.tables:
-                self._metadata.remove(Table(dst_schema.name, self._metadata))
+            self._handle_error_case(dst_schema.name)
             raise
 
         return created_table
 
     def _ingest_from_csvs(
         self,
-        conn: Connection,
         paths: Iterable[Path | str],
         src_schema: CsvTableSchema,
         dst_schema: TableSchema,
     ) -> bool:
         created_table = False
-        if not paths:
+        paths_list = list(paths)
+        if not paths_list:
             return created_table
 
-        for path in paths:
-            if self._ingest_from_csv(conn, path, src_schema, dst_schema):
+        for path in paths_list:
+            if self._ingest_from_csv(path, src_schema, dst_schema):
                 created_table = True
-        table = Table(dst_schema.name, self._metadata)
-        check_timestamps(conn, table, dst_schema)
+        table = self._backend.table(dst_schema.name)
+        check_timestamps(self._backend, table, dst_schema)
         return created_table
 
     def _ingest_from_csv(
         self,
-        conn: Connection,
         path: Path | str,
         src_schema: CsvTableSchema,
         dst_schema: TableSchema,
@@ -497,32 +412,21 @@ class Store:
         if isinstance(src_schema.time_config, IndexTimeRangeBase):
             if isinstance(dst_schema.time_config, DatetimeRange):
                 raise NotImplementedError
-                # timestamps = IndexTimeRangeGenerator(src_schema.time_config).list_timestamps()
-                # rel = ddbf.add_datetime_column(
-                #    rel=rel,
-                #    start=dst_schema.time_config.start,
-                #    resolution=dst_schema.time_config.resolution,
-                #    length=dst_schema.time_config.length,
-                #    time_array_id_columns=src_schema.time_array_id_columns,
-                #    time_column=dst_schema.time_config.time_column,
-                #    timestamps=timestamps,
-                # )
             else:
                 cls_name = dst_schema.time_config.__class__.__name__
                 msg = f"{src_schema.time_config.__class__.__name__} cannot be converted to {cls_name}"
                 raise NotImplementedError(msg)
 
         if src_schema.pivoted_dimension_name is not None:
-            return self._ingest_pivoted_table(conn, rel, src_schema, dst_schema)
+            return self._ingest_pivoted_table(rel, src_schema, dst_schema)
 
-        return self._ingest_table(conn, rel, dst_schema)
+        return self._ingest_table(rel, dst_schema)
 
     def ingest_pivoted_table(
         self,
         data: pd.DataFrame | DuckDBPyRelation,
         src_schema: PivotedTableSchema | CsvTableSchema,
         dst_schema: TableSchema,
-        connection: Optional[Connection] = None,
     ) -> bool:
         """Ingest pivoted data into the table specifed by schema. If the table does not exist,
         create it. Chronify will unpivot the data before ingesting it.
@@ -535,8 +439,6 @@ class Store:
             Defines the schema of the input data.
         dst_schema
             Defines the destination table in the database.
-        conn
-            Optional connection to reuse. Refer to :meth:`ingest_table` for notes.
 
         Returns
         -------
@@ -587,14 +489,13 @@ class Store:
         --------
         ingest_pivoted_tables
         """
-        return self.ingest_pivoted_tables((data,), src_schema, dst_schema, connection=connection)
+        return self.ingest_pivoted_tables((data,), src_schema, dst_schema)
 
     def ingest_pivoted_tables(
         self,
         data: Iterable[pd.DataFrame | DuckDBPyRelation],
         src_schema: PivotedTableSchema | CsvTableSchema,
         dst_schema: TableSchema,
-        connection: Optional[Connection] = None,
     ) -> bool:
         """Ingest pivoted data into the table specifed by schema.
 
@@ -611,8 +512,6 @@ class Store:
             Defines the schema of all input tables.
         dst_schema
             Defines the destination table in the database.
-        conn
-            Optional connection to reuse. Refer to :meth:`ingest_table` for notes.
 
         Returns
         -------
@@ -624,38 +523,28 @@ class Store:
         ingest_pivoted_table
         """
         try:
-            if connection is None:
-                with self._engine.begin() as conn:
-                    created_table = self._ingest_pivoted_tables(conn, data, src_schema, dst_schema)
-            else:
-                created_table = self._ingest_pivoted_tables(
-                    connection, data, src_schema, dst_schema
-                )
+            created_table = self._ingest_pivoted_tables(data, src_schema, dst_schema)
         except Exception:
-            self._handle_sqlite_error_case(dst_schema.name, connection)
-            if dst_schema.name in self._metadata.tables:
-                self._metadata.remove(Table(dst_schema.name, self._metadata))
+            self._handle_error_case(dst_schema.name)
             raise
 
         return created_table
 
     def _ingest_pivoted_tables(
         self,
-        conn: Connection,
         data: Iterable[pd.DataFrame | DuckDBPyRelation],
         src_schema: PivotedTableSchema | CsvTableSchema,
         dst_schema: TableSchema,
     ) -> bool:
         created_table = False
         for table in data:
-            if self._ingest_pivoted_table(conn, table, src_schema, dst_schema):
+            if self._ingest_pivoted_table(table, src_schema, dst_schema):
                 created_table = True
-        check_timestamps(conn, Table(dst_schema.name, self._metadata), dst_schema)
+        check_timestamps(self._backend, self._backend.table(dst_schema.name), dst_schema)
         return created_table
 
     def _ingest_pivoted_table(
         self,
-        conn: Connection,
         data: pd.DataFrame | DuckDBPyRelation,
         src_schema: PivotedTableSchema | CsvTableSchema,
         dst_schema: TableSchema,
@@ -674,13 +563,12 @@ class Store:
             src_schema.pivoted_dimension_name,
             dst_schema.value_column,
         )
-        return self._ingest_table(conn, rel2, dst_schema)
+        return self._ingest_table(rel2, dst_schema)
 
     def ingest_table(
         self,
-        data: pd.DataFrame | DuckDBPyRelation,
+        data: pd.DataFrame | DuckDBPyRelation | ir.Table | pa.Table,
         schema: TableSchema,
-        connection: Optional[Connection] = None,
         **kwargs: Any,
     ) -> bool:
         """Ingest data into the table specifed by schema. If the table does not exist,
@@ -692,13 +580,6 @@ class Store:
             Input data to ingest into the database.
         schema
             Defines the destination table in the database.
-        connection
-            Optional connection to reuse. If adding many tables at once, it is significantly
-            faster to use one connection. Refer to :meth:`ingest_tables` for built-in support.
-            If connection is not set, chronify will commit the database changes
-            or perform a rollback on error. If it is set, the caller must perform those actions.
-            If you peform a rollback, you must call :meth:`rebuild_schema_cache` because the
-            Store will cache all table names in memory.
 
         Returns
         -------
@@ -742,13 +623,12 @@ class Store:
         --------
         ingest_tables
         """
-        return self.ingest_tables((data,), schema, connection=connection, **kwargs)
+        return self.ingest_tables((data,), schema, **kwargs)
 
     def ingest_tables(
         self,
-        data: Iterable[pd.DataFrame | DuckDBPyRelation],
+        data: Iterable[pd.DataFrame | DuckDBPyRelation | ir.Table | pa.Table],
         schema: TableSchema,
-        connection: Optional[Connection] = None,
         **kwargs: Any,
     ) -> bool:
         """Ingest multiple input tables to the same database table.
@@ -762,8 +642,6 @@ class Store:
             Input tables to ingest into one database table.
         schema
             Defines the destination table.
-        conn
-            Optional connection to reuse. Refer to :meth:`ingest_table` for notes.
 
         Returns
         -------
@@ -780,68 +658,72 @@ class Store:
         ingest_table
         """
         created_table = False
-        if not data:
+        data_list = list(data)
+        if not data_list:
             return created_table
 
+        # Track if table existed before ingestion to avoid dropping existing data on error
+        table_existed_before = self.has_table(schema.name)
+
         try:
-            if connection is None:
-                with self._engine.begin() as conn:
-                    created_table = self._ingest_tables(conn, data, schema, **kwargs)
-            else:
-                created_table = self._ingest_tables(connection, data, schema, **kwargs)
+            created_table = self._ingest_tables(data_list, schema, **kwargs)
         except Exception:
-            self._handle_sqlite_error_case(schema.name, connection)
-            if schema.name in self._metadata.tables:
-                self._metadata.remove(Table(schema.name, self._metadata))
+            # Only drop the table if we created it; don't destroy existing data
+            if not table_existed_before:
+                self._handle_error_case(schema.name)
             raise
 
         return created_table
 
     def _ingest_tables(
         self,
-        conn: Connection,
-        data: Iterable[pd.DataFrame | DuckDBPyRelation],
+        data: Iterable[pd.DataFrame | DuckDBPyRelation | ir.Table | pa.Table],
         schema: TableSchema,
         skip_time_checks: bool = False,
     ) -> bool:
         created_table = False
         for table in data:
-            if self._ingest_table(conn, table, schema):
+            if self._ingest_table(table, schema):
                 created_table = True
         if not skip_time_checks:
-            check_timestamps(conn, Table(schema.name, self._metadata), schema)
+            check_timestamps(self._backend, self._backend.table(schema.name), schema)
         return created_table
 
     def _ingest_table(
         self,
-        conn: Connection,
-        data: pd.DataFrame | DuckDBPyRelation,
+        data: pd.DataFrame | DuckDBPyRelation | ir.Table | pa.Table,
         schema: TableSchema,
     ) -> bool:
-        if self._engine.name == "hive":
-            msg = "Data ingestion through Hive is not supported"
+        if self._backend.name == "spark":
+            msg = "Data ingestion through Spark is not supported"
             raise NotImplementedError(msg)
-        df = data.to_df() if isinstance(data, DuckDBPyRelation) else data
-        check_columns(df.columns, schema.list_columns())
 
-        table = self.try_get_table(schema.name)
-        if table is None:
-            duckdb_types = get_duckdb_types_from_pandas(df)
-            dtypes = [get_sqlalchemy_type_from_duckdb(x) for x in duckdb_types]
-            table = Table(
-                schema.name,
-                self._metadata,
-                *[Column(x, y) for x, y in zip(df.columns, dtypes)],
-            )
-            self._metadata.create_all(conn)
+        # Convert to DataFrame/PyArrow for consistent handling
+        if isinstance(data, ir.Table):
+            df = data.to_pyarrow()
+        elif isinstance(data, DuckDBPyRelation):
+            df = data.to_df()
+        else:
+            df = data
+
+        if isinstance(df, pa.Table):
+            columns = df.column_names
+        else:
+            columns = df.columns
+
+        check_columns(columns, schema.list_columns())
+
+        table_exists = self.has_table(schema.name)
+        if not table_exists:
+            # Use write_table to ensure proper datetime handling for all backends
+            write_table(self._backend, df, schema.name, [schema.time_config], if_exists="fail")
             created_table = True
         else:
+            write_table(self._backend, df, schema.name, [schema.time_config], if_exists="append")
             created_table = False
 
-        write_database(df, conn, schema.name, [schema.time_config])
-
         if created_table:
-            self._schema_mgr.add_schema(conn, schema)
+            self._schema_mgr.add_schema(schema)
 
         return created_table
 
@@ -931,8 +813,7 @@ class Store:
 
         src_schema = self._schema_mgr.get_schema(src_name)
         map_time(
-            self._engine,
-            self._metadata,
+            self._backend,
             src_schema,
             dst_schema,
             data_adjustment=data_adjustment,
@@ -941,8 +822,7 @@ class Store:
             output_file=output_file,
             check_mapped_timestamps=check_mapped_timestamps,
         )
-        with self._engine.begin() as conn:
-            self._schema_mgr.add_schema(conn, dst_schema)
+        self._schema_mgr.add_schema(dst_schema)
 
     def convert_time_zone(
         self,
@@ -1011,7 +891,7 @@ class Store:
         """
 
         src_schema = self._schema_mgr.get_schema(src_name)
-        tzc = TimeZoneConverter(self._engine, self._metadata, src_schema, time_zone)
+        tzc = TimeZoneConverter(self._backend, src_schema, time_zone)
 
         dst_schema = tzc.generate_to_schema()
         if self.has_table(dst_schema.name):
@@ -1024,8 +904,7 @@ class Store:
             check_mapped_timestamps=check_mapped_timestamps,
         )
 
-        with self._engine.begin() as conn:
-            self._schema_mgr.add_schema(conn, dst_schema)
+        self._schema_mgr.add_schema(dst_schema)
 
         return dst_schema
 
@@ -1105,7 +984,7 @@ class Store:
 
         src_schema = self._schema_mgr.get_schema(src_name)
         tzc = TimeZoneConverterByColumn(
-            self._engine, self._metadata, src_schema, time_zone_column, wrap_time_allowed
+            self._backend, src_schema, time_zone_column, wrap_time_allowed
         )
 
         dst_schema = tzc.generate_to_schema()
@@ -1119,8 +998,7 @@ class Store:
             check_mapped_timestamps=check_mapped_timestamps,
         )
 
-        with self._engine.begin() as conn:
-            self._schema_mgr.add_schema(conn, dst_schema)
+        self._schema_mgr.add_schema(dst_schema)
 
         return dst_schema
 
@@ -1154,11 +1032,6 @@ class Store:
         TableAlreadyExists
             Raised if the dst_schema name already exists.
 
-        Returns
-        -------
-        TableSchema
-            The schema of the newly created table.
-
         Examples
         --------
         >>> store = Store()
@@ -1189,14 +1062,14 @@ class Store:
         ...     value_column="value",
         ... )
         >>> store.ingest_table(df, schema)
-        >>> to_time_zone = ZoneInfo("Etc/GMT+5")
+        >>> to_time_zone = ZoneInfo("EST")
         >>> dst_schema = store.localize_time_zone(
         ...     schema.name, to_time_zone, check_mapped_timestamps=True
         ... )
         """
 
         src_schema = self._schema_mgr.get_schema(src_name)
-        tzl = TimeZoneLocalizer(self._engine, self._metadata, src_schema, time_zone)
+        tzl = TimeZoneLocalizer(self._backend, src_schema, time_zone)
 
         dst_schema = tzl.generate_to_schema()
         if self.has_table(dst_schema.name):
@@ -1209,15 +1082,14 @@ class Store:
             check_mapped_timestamps=check_mapped_timestamps,
         )
 
-        with self._engine.begin() as conn:
-            self._schema_mgr.add_schema(conn, dst_schema)
+        self._schema_mgr.add_schema(dst_schema)
 
         return dst_schema
 
     def localize_time_zone_by_column(
         self,
         src_name: str,
-        time_zone_column: Optional[str] = None,
+        time_zone_column: str,
         scratch_dir: Optional[Path] = None,
         output_file: Optional[Path] = None,
         check_mapped_timestamps: bool = False,
@@ -1230,7 +1102,7 @@ class Store:
         src_name
             Refers to the table name of the source data.
         time_zone_column
-            Name of the time zone column for localization, default to None
+            Name of the time zone column for localization.
         scratch_dir
             Directory to use for temporary writes. Default to the system's tmp filesystem.
         output_file
@@ -1243,11 +1115,6 @@ class Store:
         ------
         TableAlreadyExists
             Raised if the dst_schema name already exists.
-
-        Returns
-        -------
-        TableSchema
-            The schema of the newly created table.
 
         Examples
         --------
@@ -1264,9 +1131,7 @@ class Store:
         ...         "timestamp": np.tile(
         ...             pd.date_range(start, periods=hours_per_year, freq="h"), num_time_arrays
         ...         ),
-        ...         "time_zone": np.repeat(
-        ...             ["Etc/GMT+5", "Etc/GMT+6", "Etc/GMT+7"], hours_per_year
-        ...         ),  # EST, CST, MST
+        ...         "time_zone": np.repeat(["EST", "CST", "MST"], hours_per_year),
         ...         "value": np.random.random(hours_per_year * num_time_arrays),
         ...     }
         ... )
@@ -1291,7 +1156,7 @@ class Store:
         """
 
         src_schema = self._schema_mgr.get_schema(src_name)
-        tzl = TimeZoneLocalizerByColumn(self._engine, self._metadata, src_schema, time_zone_column)
+        tzl = TimeZoneLocalizerByColumn(self._backend, src_schema, time_zone_column)
 
         dst_schema = tzl.generate_to_schema()
         if self.has_table(dst_schema.name):
@@ -1304,17 +1169,14 @@ class Store:
             check_mapped_timestamps=check_mapped_timestamps,
         )
 
-        with self._engine.begin() as conn:
-            self._schema_mgr.add_schema(conn, dst_schema)
+        self._schema_mgr.add_schema(dst_schema)
 
         return dst_schema
 
     def read_query(
         self,
         name: str,
-        query: Selectable | str,
-        params: Any = None,
-        connection: Optional[Connection] = None,
+        query: ir.Table | str,
     ) -> pd.DataFrame:
         """Return the query result as a pandas DataFrame.
 
@@ -1323,37 +1185,30 @@ class Store:
         name
             Table or view name
         query
-            SQL query expressed as a string or salqlchemy Selectable
-        params
-            Parameters for SQL query if expressed as a string
+            SQL query as string or Ibis table expression
 
         Examples
         --------
-        >>> df = store.read_query("SELECT * FROM devices")
-        >>> df = store.read_query("SELECT * FROM devices WHERE id = ?", params=(3,))
-
-        >>> from sqlalchemy import select
-        >>> table = store.schemas.get_table("devices")
-        >>> df = store.read_query(select(table).where(table.c.id == 3)
+        >>> df = store.read_query("devices", "SELECT * FROM devices")
+        >>> df = store.read_query("devices", store.get_table("devices").filter(...))
         """
-        schema = self._schema_mgr.get_schema(name, conn=connection)
-        if connection is None:
-            with self._engine.begin() as conn:
-                return read_database(query, conn, schema.time_config, params=params)
+        schema = self._schema_mgr.get_schema(name)
+        if isinstance(query, str):
+            expr = self._backend.sql(query)
         else:
-            return read_database(query, connection, schema.time_config, params=params)
+            expr = query
+        return read_query(self._backend, expr, schema.time_config)
 
-    def read_table(self, name: str, connection: Optional[Connection] = None) -> pd.DataFrame:
+    def read_table(self, name: str) -> pd.DataFrame:
         """Return the table as a pandas DataFrame."""
         table = self.get_table(name)
-        stmt = select(table)
-        return self.read_query(name, stmt, connection=connection)
+        return self.read_query(name, table)
 
     def read_raw_query(
-        self, query: str, params: Any = None, connection: Optional[Connection] = None
+        self,
+        query: str,
     ) -> pd.DataFrame:
-        """Execute a query directly on the backend database connection, bypassing sqlalchemy, and
-        return the results as a DataFrame.
+        """Execute a query directly on the backend and return results as DataFrame.
 
         Note: Unlike :meth:`read_query`, no conversion of timestamps is performed.
         Timestamps will be in the format of the underlying database. SQLite backends will return
@@ -1363,68 +1218,35 @@ class Store:
         ----------
         query
             SQL query to execute
-        params
-            Optional parameters for SQL query
-        conn
-            Optional sqlalchemy connection returned by `Store.engine.connect()`. This can
-            improve performance when performing many reads. If used for database modifications,
-            it is the caller's responsibility to perform a commit and ensure that the connection
-            is closed correctly. Use of sqlalchemy's context manager is recommended.
 
         Examples
         --------
         >>> store = Store()
-        >>> query1 = "SELECT * from my_table WHERE column = ?"
-        >>> params1 = ("value1",)
-        >>> query2 = "SELECT * from my_table WHERE column = ?'"
-        >>> params2 = ("value2",)
-
-        >>> df = store.read_raw_query(query1, params=params1)
-
-        >>> with store.engine.connect() as conn:
-        ...     df1 = store.read_raw_query(query1, params=params1, connection=conn)
-        ...     df2 = store.read_raw_query(query2, params=params2, connection=conn)
+        >>> df = store.read_raw_query("SELECT * from my_table WHERE column = 'value'")
         """
-        if connection is None:
-            with self._engine.connect() as conn:
-                return self._read_raw_query(query, params, conn)
-        else:
-            return self._read_raw_query(query, params, connection)
-
-    def _read_raw_query(self, query: str, params: Any, conn: Connection) -> pd.DataFrame:
-        assert conn._dbapi_connection is not None
-        assert conn._dbapi_connection.driver_connection is not None
-        match self._engine.name:
-            case "duckdb":
-                df = conn._dbapi_connection.driver_connection.sql(query, params=params).to_df()
-                assert isinstance(df, pd.DataFrame)
-                return df
-            case "sqlite":
-                return pd.read_sql(query, conn._dbapi_connection.driver_connection, params=params)
-            case _:
-                msg = self._engine.name
-                raise NotImplementedError(msg)
+        expr = self._backend.sql(query)
+        return self._backend.execute(expr)
 
     def write_query_to_parquet(
         self,
-        stmt: Selectable,
+        query: ir.Table | str,
         file_path: Path | str,
         overwrite: bool = False,
         partition_columns: Optional[list[str]] = None,
     ) -> None:
         """Write the result of a query to a Parquet file."""
-        # We could add a separate path where the query is a string and skip the intermediate
-        # view if we passed parameters through the call stack.
-        view_name = make_temp_view_name()
-        create_view(view_name, stmt, self._engine, self._metadata)
-        try:
-            self.write_table_to_parquet(
-                view_name, file_path, overwrite=overwrite, partition_columns=partition_columns
-            )
-        finally:
-            with self._engine.connect() as conn:
-                conn.execute(text(f"DROP VIEW {view_name}"))
-            self._metadata.remove(Table(view_name, self._metadata))
+        if isinstance(query, str):
+            expr = self._backend.sql(query)
+        else:
+            expr = query
+
+        write_parquet(
+            self._backend,
+            expr,
+            to_path(file_path),
+            overwrite=overwrite,
+            partition_columns=partition_columns,
+        )
 
     def write_table_to_parquet(
         self,
@@ -1438,9 +1260,10 @@ class Store:
             msg = f"table {name=} is not stored"
             raise TableNotStored(msg)
 
-        write_query_to_parquet(
-            self._engine,
-            f"SELECT * FROM {name}",
+        table = self.get_table(name)
+        write_parquet(
+            self._backend,
+            table,
             to_path(file_path),
             overwrite=overwrite,
             partition_columns=partition_columns,
@@ -1451,7 +1274,6 @@ class Store:
         self,
         name: str,
         time_array_id_values: dict[str, Any],
-        connection: Optional[Connection] = None,
     ) -> int:
         """Delete all rows matching the time_array_id_values.
 
@@ -1461,8 +1283,6 @@ class Store:
             Name of table
         time_array_id_values
             Values for the time_array_id_values. Keys must match the columns in the schema.
-        connnection
-            Optional connection to the database. Refer :meth:`ingest_table` for notes.
 
         Returns
         -------
@@ -1473,16 +1293,12 @@ class Store:
         --------
         >>> store.delete_rows("devices", {"id": 47})
         """
-        # TODO: consider supporting a user-defined query. Would need to check consistency
-        # afterwards.
-        # The current approach doesn't need to check because only one single complete time
-        # array can be deleted on each call.
         table = self.get_table(name)
         if not time_array_id_values:
             msg = "time_array_id_values cannot be empty"
             raise InvalidParameter(msg)
 
-        schema = self._schema_mgr.get_schema(name, conn=connection)
+        schema = self._schema_mgr.get_schema(name)
         if sorted(time_array_id_values.keys()) != sorted(schema.time_array_id_columns):
             msg = (
                 "The keys of time_array_id_values must match the schema columns. "
@@ -1491,27 +1307,30 @@ class Store:
             )
             raise InvalidParameter(msg)
 
-        assert time_array_id_values
-        stmt = delete(table)
-
-        # duckdb does not offer a way to retrieve the number of deleted rows, so we must
-        # compute it manually.
-        # Deletions are not common. We are trading accuracy for peformance.
-        count_stmt = select(func.count()).select_from(table)
-
+        # Build filter condition
+        filter_expr = None
         for column, value in time_array_id_values.items():
-            stmt = stmt.where(table.c[column] == value)
-            count_stmt = count_stmt.where(table.c[column] == value)
+            condition = table[column] == value
+            filter_expr = condition if filter_expr is None else (filter_expr & condition)
 
-        if connection is None:
-            with self._engine.begin() as conn:
-                num_deleted = self._run_delete(conn, stmt, count_stmt)
+        # Count rows before deletion
+        count_result = self._backend.execute(table.filter(filter_expr).count())
+        if isinstance(count_result, pd.DataFrame):
+            count_before = int(count_result.iloc[0, 0])  # type: ignore[arg-type]
         else:
-            num_deleted = self._run_delete(connection, stmt, count_stmt)
-            # Let the caller commit or rollback when ready.
+            count_before = int(count_result)
+
+        # Build and execute DELETE statement
+        where_clauses = [
+            f"{col} = {_escape_sql_value(val)}" for col, val in time_array_id_values.items()
+        ]
+        where_str = " AND ".join(where_clauses)
+        self._backend.execute_sql(f"DELETE FROM {name} WHERE {where_str}")
+
+        num_deleted = count_before
 
         if num_deleted < 1:
-            msg = f"Failed to delete rows: {stmt=} {num_deleted=}"
+            msg = f"Failed to delete rows: {time_array_id_values=} {num_deleted=}"
             raise InvalidParameter(msg)
 
         logger.info(
@@ -1520,88 +1339,98 @@ class Store:
             time_array_id_values,
         )
 
-        stmt2 = select(table).limit(1)
-        is_empty = False
-        if connection is None:
-            with self._engine.connect() as conn:
-                res = conn.execute(stmt2).fetchall()
+        # Check if table is empty
+        remaining_result = self._backend.execute(table.count())
+        if isinstance(remaining_result, pd.DataFrame):
+            remaining_count = int(remaining_result.iloc[0, 0])  # type: ignore[arg-type]
         else:
-            res = connection.execute(stmt2).fetchall()
-
-        if not res:
-            is_empty = True
+            remaining_count = int(remaining_result)
+        is_empty = remaining_count == 0
 
         if is_empty:
             logger.info("Delete empty table {}", name)
-            self.drop_table(name, connection=connection)
+            self.drop_table(name)
 
         return num_deleted
-
-    def _run_delete(self, conn: Connection, stmt: Any, count_stmt: Any) -> int:
-        count1: int | None = None
-        if self._engine.name == "duckdb":
-            res1 = conn.execute(count_stmt).fetchone()
-            assert res1 is not None
-            count1 = res1[0]
-        res = conn.execute(stmt)
-        if self._engine.name == "duckdb":
-            res2 = conn.execute(count_stmt).fetchone()
-            assert res2 is not None
-            count2 = res2[0]
-            assert count1 is not None
-            num_deleted = count1 - count2
-        else:
-            num_deleted = res.rowcount
-        return num_deleted  # type: ignore
 
     def drop_table(
         self,
         name: str,
-        connection: Optional[Connection] = None,
         if_exists: bool = False,
     ) -> None:
         """Drop a table from the database."""
-        self._drop_table_or_view(name, "TABLE", connection, if_exists)
+        if not if_exists and not self.has_table(name):
+            msg = f"{name=}"
+            raise TableNotStored(msg)
 
-    def create_view(self, schema: TableSchema, stmt: Selectable) -> None:
-        """Create a view in the database."""
-        create_view(schema.name, stmt, self._engine, self._metadata)
-        with self._engine.begin() as conn:
-            self._schema_mgr.add_schema(conn, schema)
+        self._backend.drop_table(name, if_exists=if_exists)
+        if name in self._schema_mgr._cache:
+            self._schema_mgr.remove_schema(name)
+        logger.info("Dropped table {}", name)
+
+    def create_view(
+        self,
+        schema: TableSchema,
+        table: ir.Table,
+        bypass_checks: bool = False,
+    ) -> None:
+        """Register an Ibis table as a view with time validation.
+
+        Creates a view and persists the schema. Both the view and schema
+        will survive process restarts (for backends that support persistent storage).
+
+        When using Spark, enabling the Hive metastore is required to persist restarts.
+
+        Parameters
+        ----------
+        schema
+            Defines the schema of the view. The name in the schema will be used as
+            the view name.
+        table
+            Ibis table expression to register. This can be a table loaded from a
+            Parquet file, a query result, or any other Ibis table expression.
+        bypass_checks
+            If True, skip time validation checks. Defaults to False.
+
+        Raises
+        ------
+        InvalidTable
+            Raised if time validation fails and bypass_checks is False.
+        """
+        self._backend.create_view(schema.name, table)
+        self._schema_mgr.add_schema(schema)
+
+        if not bypass_checks:
+            try:
+                registered_table = self.get_table(schema.name)
+                check_timestamps(self._backend, registered_table, schema)
+            except InvalidTable:
+                self._backend.drop_view(schema.name, if_exists=True)
+                self._backend.drop_table(f"_backing_{schema.name}", if_exists=True)
+                self._schema_mgr.remove_schema(schema.name)
+                raise
+
+        logger.info("Registered permanent view {} with schema", schema.name)
 
     def drop_view(
         self,
         name: str,
-        connection: Optional[Connection] = None,
         if_exists: bool = False,
     ) -> None:
         """Drop a view from the database."""
-        self._drop_table_or_view(name, "VIEW", connection, if_exists)
+        if not if_exists and not self.has_table(name):
+            msg = f"{name=}"
+            raise TableNotStored(msg)
 
-    def _drop_table_or_view(
-        self,
-        name: str,
-        table_type: str,
-        connection: Optional[Connection],
-        if_exists: bool,
-    ) -> None:
-        table = self.get_table(name)
-        if_exists_str = " IF EXISTS" if if_exists else ""
-        if connection is None:
-            with self._engine.begin() as conn:
-                conn.execute(text(f"DROP {table_type} {if_exists_str} {name}"))
-                self._schema_mgr.remove_schema(conn, name)
-        else:
-            connection.execute(text(f"DROP {table_type} {if_exists_str} {name}"))
-            self._schema_mgr.remove_schema(connection, name)
+        self._backend.drop_view(name, if_exists=if_exists)
+        if name in self._schema_mgr._cache:
+            self._schema_mgr.remove_schema(name)
+        logger.info("Dropped view {}", name)
 
-        self._metadata.remove(table)
-        logger.info("Dropped {} {}", table_type.lower(), name)
-
-    def _handle_sqlite_error_case(self, name: str, connection: Optional[Connection]) -> None:
-        if connection is None and self._engine.name == "sqlite":
-            with self._engine.begin() as conn:
-                conn.execute(text(f"DROP TABLE IF EXISTS {name}"))
+    def _handle_error_case(self, name: str) -> None:
+        """Clean up after an error during ingestion."""
+        # Ibis backends don't support transactions for DDL, so manually drop the table
+        self._backend.drop_table(name, if_exists=True)
 
 
 def check_columns(
@@ -1621,3 +1450,31 @@ def check_columns(
         cols = " ".join(sorted(diff))
         msg = f"These columns are defined in the schema but not present in the table: {cols}"
         raise InvalidTable(msg)
+
+
+def _escape_sql_value(value: Any) -> str:
+    """Escape a value for safe inclusion in SQL statements.
+
+    Parameters
+    ----------
+    value
+        The value to escape
+
+    Returns
+    -------
+    str
+        SQL-safe string representation of the value
+    """
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        # Escape single quotes by doubling them
+        escaped = value.replace("'", "''")
+        return f"'{escaped}'"
+    # For other types, convert to string and escape
+    escaped = str(value).replace("'", "''")
+    return f"'{escaped}'"
