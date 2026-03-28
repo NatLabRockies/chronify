@@ -1,6 +1,7 @@
 from collections.abc import Iterable
 from pathlib import Path
 import shutil
+import os
 from typing import Any, Optional
 from chronify.utils.sql import make_temp_view_name
 from datetime import tzinfo
@@ -40,6 +41,7 @@ from chronify.models import (
     get_duckdb_types_from_pandas,
     get_sqlalchemy_type_from_duckdb,
 )
+from chronify.csv_utils import _should_use_auto_detect, _is_large_file, _get_file_size
 from chronify.sqlalchemy.functions import (
     create_view_from_parquet,
     read_database,
@@ -352,6 +354,7 @@ class Store:
         src_schema: CsvTableSchema,
         dst_schema: TableSchema,
         connection: Optional[Connection] = None,
+        auto_detect: Optional[bool] = None,
     ) -> bool:
         """Ingest data from a CSV file.
 
@@ -365,6 +368,8 @@ class Store:
             Defines the destination table in the database.
         connection
             Optional connection to reuse. Refer to :meth:`ingest_table` for notes.
+        auto_detect
+            Enable auto-detection. If None, checks CHRONIFY_AUTO_DETECT_CSV environment variable.
 
         Returns
         -------
@@ -405,7 +410,12 @@ class Store:
         --------
         ingest_from_csvs
         """
-        return self.ingest_from_csvs((path,), src_schema, dst_schema, connection=connection)
+        if _should_use_auto_detect(auto_detect) and _is_large_file(path):
+            logger.info(f"Processing large file {path} with auto-detection optimizations")
+
+        return self.ingest_from_csvs(
+            (path,), src_schema, dst_schema, connection=connection, auto_detect=auto_detect
+        )
 
     def ingest_from_csvs(
         self,
@@ -413,12 +423,13 @@ class Store:
         src_schema: CsvTableSchema,
         dst_schema: TableSchema,
         connection: Optional[Connection] = None,
+        auto_detect: Optional[bool] = None,
     ) -> bool:
-        """Ingest data into the table specifed by schema. If the table does not exist,
-        create it. This is faster than calling :meth:`ingest_from_csv` many times.
-        Each file is loaded into memory one at a time.
-        If any error occurs, all added data will be removed and the state of the database will
-        be the same as the original state.
+        """Ingest data from multiple CSV files.
+
+        This is faster than calling :meth:`ingest_from_csv` multiple times.
+        Each file is loaded one at a time. If any error occurs, all added data
+        will be removed and the database state will be unchanged.
 
         Parameters
         ----------
@@ -430,6 +441,8 @@ class Store:
             Defines the destination table in the database.
         conn
             Optional connection to reuse. Refer to :meth:`ingest_table` for notes.
+        auto_detect
+            Enable auto-detection. If None, checks CHRONIFY_AUTO_DETECT_CSV environment variable.
 
         Returns
         -------
@@ -1602,6 +1615,67 @@ class Store:
         if connection is None and self._engine.name == "sqlite":
             with self._engine.begin() as conn:
                 conn.execute(text(f"DROP TABLE IF EXISTS {name}"))
+
+    # Simple CSV Inspection (Always Available)
+    def inspect_csv(
+        self, path: Path | str, peek_rows: int = 5, auto_detect: Optional[bool] = None
+    ) -> dict[str, Any]:
+        """Inspect CSV file structure and provide recommendations.
+
+        Parameters
+        ----------
+        path
+            Path to CSV file
+        peek_rows
+            Number of rows to sample
+        auto_detect
+            Enable auto-detection. If None, checks CHRONIFY_AUTO_DETECT_CSV environment variable.
+
+        Returns
+        -------
+        dict
+            File information including columns, detected format, size, and recommendations
+        """
+        import duckdb
+
+        file_size_mb = _get_file_size(str(path)) / (1024 * 1024) if os.path.exists(path) else 0
+        is_large = _is_large_file(path)
+
+        try:
+            rel = duckdb.sql(f"SELECT * FROM read_csv('{path}') LIMIT {peek_rows}")
+            columns = rel.columns
+            sample_data = rel.to_df().to_dict("records")
+        except Exception as e:
+            return {"error": f"Could not read CSV: {e}"}
+
+        auto_detect_enabled = _should_use_auto_detect(auto_detect)
+        recommendations = []
+        if is_large:
+            if auto_detect_enabled:
+                recommendations.append("Large file detected - auto-detection optimizations active")
+            else:
+                recommendations.append(
+                    "Consider enabling auto-detection for better large file handling"
+                )
+
+        detected_format = None
+        col_set = {col.lower().strip() for col in columns}
+        if "name" in col_set and "value" in col_set and len(col_set) == 2:
+            detected_format = "name_value"
+        elif "datetime" in col_set or "timestamp" in col_set:
+            detected_format = "datetime_series"
+        elif any(f"m{i:02d}" in col_set for i in range(1, 13)):
+            detected_format = "monthly_data"
+
+        return {
+            "columns": columns,
+            "detected_format": detected_format,
+            "file_size_mb": round(file_size_mb, 2),
+            "is_large_file": is_large,
+            "auto_detect_enabled": auto_detect_enabled,
+            "sample_data": sample_data,
+            "recommendations": recommendations,
+        }
 
 
 def check_columns(
