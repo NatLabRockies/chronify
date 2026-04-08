@@ -1,11 +1,12 @@
 import abc
 from zoneinfo import ZoneInfo
 from datetime import tzinfo
-from sqlalchemy import Engine, MetaData, Table, select
 from typing import Optional
 from pathlib import Path
 import pandas as pd
 
+from chronify.ibis.base import IbisBackend
+from chronify.ibis.functions import read_query
 from chronify.models import TableSchema, MappingTableSchema
 from chronify.time_configs import (
     DatetimeRangeBase,
@@ -19,108 +20,42 @@ from chronify.datetime_range_generator import (
 from chronify.exceptions import InvalidParameter, MissingValue
 from chronify.time_series_mapper_base import apply_mapping
 from chronify.time_range_generator_factory import make_time_range_generator
-from chronify.sqlalchemy.functions import read_database
 from chronify.time import TimeDataType, TimeType
 from chronify.time_utils import wrapped_time_timestamps, get_tzname
 
 
-# TODO - allow option to retain original timestamp column - Issue #64
 def convert_time_zone(
-    engine: Engine,
-    metadata: MetaData,
+    backend: IbisBackend,
     src_schema: TableSchema,
     to_time_zone: tzinfo | None,
-    scratch_dir: Optional[Path] = None,
     output_file: Optional[Path] = None,
     check_mapped_timestamps: bool = False,
 ) -> TableSchema:
     """Convert time zone of a table to a specified time zone.
 
     Output timestamp is tz-naive with a new time_zone column added.
-
-    Parameters
-    ----------
-    engine : sqlalchemy.Engine
-        SQLAlchemy engine.
-    metadata : sqlalchemy.MetaData
-        SQLAlchemy metadata.
-    src_schema : TableSchema
-        Defines the source table in the database.
-    to_time_zone : tzinfo or None
-        Time zone to convert to. If None, convert to tz-naive.
-    scratch_dir : pathlib.Path, optional
-        Directory to use for temporary writes. Defaults to the system's tmp filesystem.
-    output_file : pathlib.Path, optional
-        If set, write the mapped table to this Parquet file.
-    check_mapped_timestamps : bool, optional
-        Perform time checks on the result of the mapping operation. This can be slow and
-        is not required.
-
-    Returns
-    -------
-    TableSchema
-        Schema of output table with converted timestamps.
     """
-    tzc = TimeZoneConverter(engine, metadata, src_schema, to_time_zone)
+    tzc = TimeZoneConverter(backend, src_schema, to_time_zone)
     tzc.convert_time_zone(
-        scratch_dir=scratch_dir,
         output_file=output_file,
         check_mapped_timestamps=check_mapped_timestamps,
     )
-
     return tzc._to_schema
 
 
 def convert_time_zone_by_column(
-    engine: Engine,
-    metadata: MetaData,
+    backend: IbisBackend,
     src_schema: TableSchema,
     time_zone_column: str,
     wrap_time_allowed: Optional[bool] = False,
-    scratch_dir: Optional[Path] = None,
     output_file: Optional[Path] = None,
     check_mapped_timestamps: bool = False,
 ) -> TableSchema:
     """Convert time zone of a table to multiple time zones specified by a column.
     Output timestamp is tz-naive, reflecting the local time relative to the time_zone_column.
-
-    Parameters
-    ----------
-    engine : sqlalchemy.Engine
-        sqlalchemy engine
-    metadata : sqlalchemy.MetaData
-        sqlalchemy metadata
-    src_schema : TableSchema
-        Defines the source table in the database.
-    time_zone_column : str
-        Column name in the source table that contains the time zone information.
-    wrap_time_allowed : bool
-        If False, the converted timestamps will be aligned with the original timestamps in real time scale
-        E.g. 2018-01-01 00:00 ~ 2018-12-31 23:00 in US/Eastern becomes
-        2017-12-31 23:00 ~ 2018-12-31 22:00 in US/Central
-        If True, the converted timestamps will fit into the time range of the src_schema in tz-naive clock time
-        E.g. 2018-01-01 00:00 ~ 2018-12-31 23:00 in US/Eastern becomes
-        2017-12-31 23:00 ~ 2018-12-31 22:00 in US/Central, which is then wrapped such that
-        no clock time timestamps are in 2017. The final timestamps are:
-        2018-12-31 23:00, 2018-01-01 00:00 ~ 2018-12-31 22:00 in US/Central
-    scratch_dir : pathlib.Path, optional
-        Directory to use for temporary writes. Default to the system's tmp filesystem.
-    output_file : pathlib.Path, optional
-        If set, write the mapped table to this Parquet file.
-    check_mapped_timestamps : bool, optional
-        Perform time checks on the result of the mapping operation. This can be slow and
-        is not required.
-
-    Returns
-    -------
-    dst_schema : TableSchema
-        schema of output table with converted timestamps
     """
-    tzc = TimeZoneConverterByColumn(
-        engine, metadata, src_schema, time_zone_column, wrap_time_allowed
-    )
+    tzc = TimeZoneConverterByColumn(backend, src_schema, time_zone_column, wrap_time_allowed)
     tzc.convert_time_zone(
-        scratch_dir=scratch_dir,
         output_file=output_file,
         check_mapped_timestamps=check_mapped_timestamps,
     )
@@ -132,12 +67,10 @@ class TimeZoneConverterBase(abc.ABC):
 
     def __init__(
         self,
-        engine: Engine,
-        metadata: MetaData,
+        backend: IbisBackend,
         from_schema: TableSchema,
     ):
-        self._engine = engine
-        self._metadata = metadata
+        self._backend = backend
         self._check_from_schema(from_schema)
         self._from_schema = from_schema
 
@@ -171,7 +104,6 @@ class TimeZoneConverterBase(abc.ABC):
     @abc.abstractmethod
     def convert_time_zone(
         self,
-        scratch_dir: Optional[Path] = None,
         output_file: Optional[Path] = None,
         check_mapped_timestamps: bool = False,
     ) -> None:
@@ -179,31 +111,20 @@ class TimeZoneConverterBase(abc.ABC):
 
 
 class TimeZoneConverter(TimeZoneConverterBase):
-    """Class for time zone conversion of tz-aware, aligned_in_absolute_time
-    time series data to a specified time zone.
-
-    Input data table must contain tz-aware timestamps.
-    Input time config must be of type DatetimeRange with Timestamp_TZ dtype and tz-aware start time.
-    Output data table will contain tz-naive timestamps with time zone recorded in a column
-    Output time config will be of type DatetimeRange with Timestamp_NTZ dtype and tz-naive start time.
-
-    # TODO: support DatetimeRangeWithTZColumn as input time config - Issue #64
-    # TODO: support wrap_time_allowed option - Issue #64
-    """
+    """Convert tz-aware timestamps to a specified time zone (tz-naive output)."""
 
     def __init__(
         self,
-        engine: Engine,
-        metadata: MetaData,
+        backend: IbisBackend,
         from_schema: TableSchema,
         to_time_zone: tzinfo | None,
     ):
-        super().__init__(engine, metadata, from_schema)
+        super().__init__(backend, from_schema)
         self._to_time_zone = to_time_zone
         self._to_schema = self.generate_to_schema()
 
     def generate_to_time_config(self) -> DatetimeRangeWithTZColumn:
-        assert isinstance(self._from_schema.time_config, DatetimeRange)  # mypy
+        assert isinstance(self._from_schema.time_config, DatetimeRange)
         time_kwargs = self._from_schema.time_config.model_dump()
         time_kwargs = dict(
             filter(
@@ -239,40 +160,35 @@ class TimeZoneConverter(TimeZoneConverterBase):
 
     def convert_time_zone(
         self,
-        scratch_dir: Optional[Path] = None,
         output_file: Optional[Path] = None,
         check_mapped_timestamps: bool = False,
     ) -> None:
         df, mapping_schema = self._create_mapping()
-
         apply_mapping(
             df,
             mapping_schema,
             self._from_schema,
             self._to_schema,
-            self._engine,
-            self._metadata,
+            self._backend,
             TimeBasedDataAdjustment(),
-            scratch_dir=scratch_dir,
             output_file=output_file,
             check_mapped_timestamps=check_mapped_timestamps,
         )
 
     def _create_mapping(self) -> tuple[pd.DataFrame, MappingTableSchema]:
-        """Create mapping dataframe for converting datetime to geography-based time zone"""
-        assert isinstance(self._from_schema.time_config, DatetimeRange)  # mypy
+        assert isinstance(self._from_schema.time_config, DatetimeRange)
         time_col = self._from_schema.time_config.time_column
         from_time_col = "from_" + time_col
         from_time_data = make_time_range_generator(self._from_schema.time_config).list_timestamps()
         to_time_generator = make_time_range_generator(self._to_schema.time_config)
-        assert isinstance(to_time_generator, DatetimeRangeGeneratorExternalTimeZone)  # mypy
+        assert isinstance(to_time_generator, DatetimeRangeGeneratorExternalTimeZone)
         to_time_data_dct = to_time_generator.list_timestamps_by_time_zone()
 
         from_time_config = self._from_schema.time_config.model_copy(
             update={"time_column": from_time_col}
         )
         to_time_config = self._to_schema.time_config
-        assert isinstance(to_time_config, DatetimeRangeWithTZColumn)  # mypy
+        assert isinstance(to_time_config, DatetimeRangeWithTZColumn)
         tz_col = to_time_config.time_zone_column
         tz_name = get_tzname(self._to_time_zone)
         to_time_data = to_time_data_dct[tz_name]
@@ -292,39 +208,11 @@ class TimeZoneConverter(TimeZoneConverterBase):
 
 
 class TimeZoneConverterByColumn(TimeZoneConverterBase):
-    """Class for time zone conversion of tz-aware, aligned_in_absolute_time
-    time series data based on a time zone column.
-
-    Input data table must contain tz-aware timestamps and a time zone column.
-    Input time config must be of type DatetimeRangeWithTZColumn or DatetimeRange with Timestamp_TZ dtype.
-     - If DatetimeRange is used, time_zone_column must be provided.
-     - If DatetimeRangeWithTZColumn is used, it is converted to DatetimeRange internally.
-     time_zone_column, if provided, is ignored and instead taken from the time_config.
-    Output data table will contain tz-naive timestamps and the original time zone column.
-    Output time config will be of type DatetimeRangeWithTZColumn with Timestamp_NTZ dtype (see scenarios).
-
-    I/O Time config scenarios:
-    --------------------------------
-    To convert tz-aware timestamps aligned_in_absolute_time to multiple time zones specified in a column:
-     - wrap_time_allowed = False
-     - Input time config: DatetimeRange with tz-aware start time, Timestamp_TZ dtype
-     - Output time config: DatetimeRangeWithTZColumn with tz-aware start time, Timestamp_NTZ dtype
-
-    To convert tz-aware timestamps aligned_in_absolute_time to multiple time zones specified in a column
-    and aligned_in_local_standard_time:
-     - wrap_time_allowed = True
-     - Input time config: DatetimeRange with tz-aware start time, Timestamp_TZ dtype
-     - Output time config: DatetimeRangeWithTZColumn with tz-naive start time, Timestamp_NTZ dtype
-     Note: converted time is wrapped within the local time range of the original timestamps.
-    --------------------------------
-
-    # TODO: support DatetimeRangeWithTZColumn as input time config - Issue #64
-    """
+    """Convert tz-aware timestamps to multiple time zones specified by a column."""
 
     def __init__(
         self,
-        engine: Engine,
-        metadata: MetaData,
+        backend: IbisBackend,
         from_schema: TableSchema,
         time_zone_column: str,
         wrap_time_allowed: Optional[bool] = False,
@@ -332,13 +220,13 @@ class TimeZoneConverterByColumn(TimeZoneConverterBase):
         if time_zone_column not in from_schema.time_array_id_columns:
             msg = f"{time_zone_column=} is missing from {from_schema.time_array_id_columns=}"
             raise MissingValue(msg)
-        super().__init__(engine, metadata, from_schema)
+        super().__init__(backend, from_schema)
         self.time_zone_column = time_zone_column
         self._wrap_time_allowed = wrap_time_allowed
         self._to_schema = self.generate_to_schema()
 
     def generate_to_time_config(self) -> DatetimeRangeBase:
-        assert isinstance(self._from_schema.time_config, DatetimeRange)  # mypy
+        assert isinstance(self._from_schema.time_config, DatetimeRange)
         time_kwargs = self._from_schema.time_config.model_dump()
         time_kwargs = dict(
             filter(
@@ -370,48 +258,41 @@ class TimeZoneConverterByColumn(TimeZoneConverterBase):
 
     def convert_time_zone(
         self,
-        scratch_dir: Optional[Path] = None,
         output_file: Optional[Path] = None,
         check_mapped_timestamps: bool = False,
     ) -> None:
         df, mapping_schema = self._create_mapping()
-
         apply_mapping(
             df,
             mapping_schema,
             self._from_schema,
             self._to_schema,
-            self._engine,
-            self._metadata,
+            self._backend,
             TimeBasedDataAdjustment(),
-            scratch_dir=scratch_dir,
             output_file=output_file,
             check_mapped_timestamps=check_mapped_timestamps,
         )
 
     def _get_time_zones(self) -> list[tzinfo | None]:
-        with self._engine.connect() as conn:
-            table = Table(self._from_schema.name, self._metadata)
-            stmt = (
-                select(table.c[self.time_zone_column])
-                .distinct()
-                .where(table.c[self.time_zone_column].is_not(None))
-            )
-            time_zones = read_database(stmt, conn, self._from_schema.time_config)[
-                self.time_zone_column
-            ].to_list()
-
+        table = self._backend.table(self._from_schema.name)
+        expr = (
+            table.select(self.time_zone_column)
+            .distinct()
+            .filter(table[self.time_zone_column].notnull())
+        )
+        time_zones = read_query(self._backend, expr, self._from_schema.time_config)[
+            self.time_zone_column
+        ].to_list()
         time_zones = [None if tz == "None" else ZoneInfo(tz) for tz in time_zones]
         return time_zones
 
     def _create_mapping(self) -> tuple[pd.DataFrame, MappingTableSchema]:
-        """Create mapping dataframe for converting datetime to column time zones"""
-        assert isinstance(self._from_schema.time_config, DatetimeRange)  # mypy
+        assert isinstance(self._from_schema.time_config, DatetimeRange)
         time_col = self._from_schema.time_config.time_column
         from_time_col = "from_" + time_col
         from_time_data = make_time_range_generator(self._from_schema.time_config).list_timestamps()
         to_time_generator = make_time_range_generator(self._to_schema.time_config)
-        assert isinstance(to_time_generator, DatetimeRangeGeneratorExternalTimeZone)  # mypy
+        assert isinstance(to_time_generator, DatetimeRangeGeneratorExternalTimeZone)
         to_time_data_dct = to_time_generator.list_timestamps_by_time_zone()
 
         from_tz_col = "from_" + self.time_zone_column
@@ -424,7 +305,6 @@ class TimeZoneConverterByColumn(TimeZoneConverterBase):
         for tz_name, time_data in to_time_data_dct.items():
             to_time_data: list[pd.Timestamp]
             if self._wrap_time_allowed:
-                # assume it is being wrapped based on the tz-naive version of the original time data
                 final_time_data = [x.tz_localize(None) for x in from_time_data]
                 to_time_data = wrapped_time_timestamps(time_data, final_time_data)
             else:

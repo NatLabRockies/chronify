@@ -10,16 +10,6 @@ import duckdb
 import numpy as np
 import pandas as pd
 import pytest
-from sqlalchemy import (
-    Connection,
-    DateTime,
-    Double,
-    Engine,
-    Integer,
-    Table,
-    create_engine,
-    select,
-)
 
 from chronify.csv_io import read_csv
 from chronify.duckdb.functions import unpivot
@@ -31,6 +21,7 @@ from chronify.exceptions import (
     TableAlreadyExists,
     TableNotStored,
 )
+from chronify.ibis import make_backend
 from chronify.models import ColumnDType, CsvTableSchema, PivotedTableSchema, TableSchema
 from chronify.store import Store
 from chronify.time import TimeIntervalType, DaylightSavingAdjustmentType
@@ -61,10 +52,10 @@ def generators_schema():
     src_schema = CsvTableSchema(
         time_config=time_config,
         column_dtypes=[
-            ColumnDType(name="timestamp", dtype=DateTime(timezone=False)),
-            ColumnDType(name="gen1", dtype=Double()),
-            ColumnDType(name="gen2", dtype=Double()),
-            ColumnDType(name="gen3", dtype=Double()),
+            ColumnDType(name="timestamp", dtype="datetime"),
+            ColumnDType(name="gen1", dtype="float"),
+            ColumnDType(name="gen2", dtype="float"),
+            ColumnDType(name="gen3", dtype="float"),
         ],
         value_columns=["gen1", "gen2", "gen3"],
         pivoted_dimension_name="generator",
@@ -110,9 +101,8 @@ def multiple_tables():
 def test_ingest_csv(iter_stores_by_engine: Store, tmp_path, generators_schema, use_time_zone):
     store = iter_stores_by_engine
     src_file, src_schema, dst_schema = generators_schema
-    src_schema.column_dtypes[0] = ColumnDType(
-        name="timestamp", dtype=DateTime(timezone=use_time_zone)
-    )
+    import ibis.expr.datatypes as dt
+
     if use_time_zone:
         new_src_file = tmp_path / "gen_tz.csv"
         duckdb.sql(
@@ -122,6 +112,9 @@ def test_ingest_csv(iter_stores_by_engine: Store, tmp_path, generators_schema, u
         """
         ).to_df().to_csv(new_src_file, index=False)
         src_file = new_src_file
+        src_schema.column_dtypes[0] = ColumnDType(
+            name="timestamp", dtype=dt.Timestamp(timezone="Etc/GMT+5")
+        )
     store.ingest_from_csv(src_file, src_schema, dst_schema)
     df = store.read_table(dst_schema.name)
     assert len(df) == 8784 * 3
@@ -137,13 +130,14 @@ def test_ingest_csv(iter_stores_by_engine: Store, tmp_path, generators_schema, u
     expected_timestamps = timestamp_generator.list_timestamps()
 
     # Test addition of new generators to the same table.
+    ts_dtype = dt.Timestamp(timezone="Etc/GMT+5") if use_time_zone else "datetime"
     src_schema2 = CsvTableSchema(
         time_config=src_schema.time_config,
         column_dtypes=[
-            ColumnDType(name="timestamp", dtype=DateTime(timezone=use_time_zone)),
-            ColumnDType(name="g1b", dtype=Double()),
-            ColumnDType(name="g2b", dtype=Double()),
-            ColumnDType(name="g3b", dtype=Double()),
+            ColumnDType(name="timestamp", dtype=ts_dtype),
+            ColumnDType(name="g1b", dtype="float"),
+            ColumnDType(name="g2b", dtype="float"),
+            ColumnDType(name="g3b", dtype="float"),
         ],
         value_columns=["g1b", "g2b", "g3b"],
         pivoted_dimension_name="generator",
@@ -168,11 +162,9 @@ def test_ingest_csv(iter_stores_by_engine: Store, tmp_path, generators_schema, u
 
 
 def test_ingest_csvs_with_rollback(tmp_path, multiple_tables):
-    # Python sqlite3 does not appear to support rollbacks with DDL statements.
-    # See discussion at https://bugs.python.org/issue10740.
-    # TODO: needs investigation
-    # Most users won't care...and will be using duckdb since it is the default.
-    store = Store(engine_name="duckdb")
+    # The new ibis-based backend uses pseudo-transactions that track created objects.
+    # Real SQL rollbacks are not supported.
+    store = Store(backend_name="duckdb")
     tables, dst_schema = multiple_tables
     src_file1 = tmp_path / "file1.csv"
     src_file2 = tmp_path / "file2.csv"
@@ -181,50 +173,25 @@ def test_ingest_csvs_with_rollback(tmp_path, multiple_tables):
     src_schema = CsvTableSchema(
         time_config=dst_schema.time_config,
         column_dtypes=[
-            ColumnDType(name="timestamp", dtype=DateTime()),
-            ColumnDType(name="id", dtype=Integer()),
-            ColumnDType(name="value", dtype=Double()),
+            ColumnDType(name="timestamp", dtype="datetime"),
+            ColumnDType(name="id", dtype="int"),
+            ColumnDType(name="value", dtype="float"),
         ],
         value_columns=[dst_schema.value_column],
         time_array_id_columns=dst_schema.time_array_id_columns,
     )
 
-    def check_data(conn: Connection):
-        df = store.read_table(dst_schema.name, connection=conn)
-        assert len(df) == len(tables[0]) + len(tables[1])
-        assert len(df.id.unique()) == 2
-
-    with store.engine.begin() as conn:
-        store.ingest_from_csvs((src_file1, src_file2), src_schema, dst_schema, connection=conn)
-        check_data(conn)
-        conn.rollback()
-
-    store.update_metadata()
-    assert not store.has_table(dst_schema.name)
-
-    with store.engine.begin() as conn:
-        store.ingest_from_csvs((src_file1, src_file2), src_schema, dst_schema, connection=conn)
-        check_data(conn)
-
-    with store.engine.begin() as conn:
-        check_data(conn)
+    store.ingest_from_csvs((src_file1, src_file2), src_schema, dst_schema)
+    df = store.read_table(dst_schema.name)
+    assert len(df) == len(tables[0]) + len(tables[1])
+    assert len(df.id.unique()) == 2
 
 
-@pytest.mark.parametrize("existing_connection", [False, True])
-def test_ingest_multiple_tables(
-    iter_stores_by_engine: Store, multiple_tables, existing_connection: bool
-):
+def test_ingest_multiple_tables(iter_stores_by_engine: Store, multiple_tables):
     store = iter_stores_by_engine
     tables, schema = multiple_tables
-    if existing_connection:
-        store.ingest_tables(tables, schema)
-    else:
-        with store.engine.begin() as conn:
-            store.ingest_tables(tables, schema, connection=conn)
-    query = "SELECT * FROM devices WHERE id = ?"
-    params = (2,)
-    with store.engine.connect() as conn:
-        df = store.read_query("devices", query, params=params, connection=conn)
+    store.ingest_tables(tables, schema)
+    df = store.read_query("devices", "SELECT * FROM devices WHERE id = 2")
     df["timestamp"] = df["timestamp"].astype("datetime64[ns]")
     assert df.equals(tables[1])
 
@@ -240,8 +207,7 @@ def test_ingest_multiple_tables_error(iter_stores_by_engine: Store, multiple_tab
 
     tables[1].loc[8783] = (tables[1].loc[8783]["timestamp"], 0.1, orig_value)
     store.ingest_tables(tables, schema)
-    params = (2,)
-    df = store.read_query(schema.name, f"select * from {schema.name} where id=?", params=params)
+    df = store.read_query(schema.name, f"select * from {schema.name} where id=2")
     df["timestamp"] = df["timestamp"].astype("datetime64[ns]")
     assert df.equals(tables[1])
 
@@ -255,7 +221,7 @@ def test_ingest_pivoted_table(iter_stores_by_engine: Store, generators_schema, u
     input_table = rel.to_df() if use_pandas else rel
     store.ingest_pivoted_table(input_table, pivoted_schema, dst_schema)
     table = store.get_table(dst_schema.name)
-    stmt = select(table).where(table.c.generator == "gen1")
+    stmt = table.filter(table.generator == "gen1")
     df = store.read_query(dst_schema.name, stmt)
     assert len(df) == 8784
 
@@ -313,7 +279,7 @@ def test_ingest_one_week_per_month_by_hour_invalid(
 
 def test_load_parquet(iter_stores_by_engine_no_data_ingestion: Store, tmp_path):
     store = iter_stores_by_engine_no_data_ingestion
-    if store.engine.name == "sqlite":
+    if store.backend.name == "sqlite":
         # SQLite doesn't support parquet
         return
 
@@ -328,10 +294,10 @@ def test_load_parquet(iter_stores_by_engine_no_data_ingestion: Store, tmp_path):
     src_schema = CsvTableSchema(
         time_config=time_config,
         column_dtypes=[
-            ColumnDType(name="timestamp", dtype=DateTime(timezone=False)),
-            ColumnDType(name="gen1", dtype=Double()),
-            ColumnDType(name="gen2", dtype=Double()),
-            ColumnDType(name="gen3", dtype=Double()),
+            ColumnDType(name="timestamp", dtype="datetime"),
+            ColumnDType(name="gen1", dtype="float"),
+            ColumnDType(name="gen2", dtype="float"),
+            ColumnDType(name="gen3", dtype="float"),
         ],
         value_columns=["gen1", "gen2", "gen3"],
         pivoted_dimension_name="generator",
@@ -354,7 +320,7 @@ def test_load_parquet(iter_stores_by_engine_no_data_ingestion: Store, tmp_path):
     expected_timestamps = timestamp_generator.list_timestamps()
     all(df.timestamp.unique() == expected_timestamps)
 
-    # This adds test coverage for Hive.
+    # This adds test coverage for views.
     as_dict = dst_schema.model_dump()
     as_dict["name"] = "test_view"
     schema2 = TableSchema(**as_dict)
@@ -407,12 +373,7 @@ def test_map_one_week_per_month_by_hour_to_datetime(
         ),
         time_array_id_columns=["id"],
     )
-    if store.engine.name == "hive":
-        out_file = tmp_path / "data.parquet"
-        df.to_parquet(out_file)
-        store.create_view_from_parquet(out_file, src_schema)
-    else:
-        store.ingest_table(df, src_schema)
+    store.ingest_table(df, src_schema)
     store.map_table_time_config(src_schema.name, dst_schema, check_mapped_timestamps=True)
     df2 = store.read_table(dst_schema.name)
     assert len(df2) == time_array_len * num_time_arrays
@@ -424,12 +385,8 @@ def test_map_one_week_per_month_by_hour_to_datetime(
 
     out_file = tmp_path / "out.parquet"
     assert not out_file.exists()
-    if store.engine.name == "sqlite":
-        with pytest.raises(NotImplementedError):
-            store.write_table_to_parquet(dst_schema.name, out_file)
-    else:
-        store.write_table_to_parquet(dst_schema.name, out_file, overwrite=True)
-        assert out_file.exists()
+    store.write_table_to_parquet(dst_schema.name, out_file, overwrite=True)
+    assert out_file.exists()
 
     with pytest.raises(TableAlreadyExists):
         store.map_table_time_config(src_schema.name, dst_schema, check_mapped_timestamps=True)
@@ -461,10 +418,10 @@ def test_map_datetime_to_datetime(
     src_csv_schema = CsvTableSchema(
         time_config=src_time_config,
         column_dtypes=[
-            ColumnDType(name="timestamp", dtype=DateTime(timezone=False)),
-            ColumnDType(name="gen1", dtype=Double()),
-            ColumnDType(name="gen2", dtype=Double()),
-            ColumnDType(name="gen3", dtype=Double()),
+            ColumnDType(name="timestamp", dtype="datetime"),
+            ColumnDType(name="gen1", dtype="float"),
+            ColumnDType(name="gen2", dtype="float"),
+            ColumnDType(name="gen3", dtype="float"),
         ],
         value_columns=["gen1", "gen2", "gen3"],
         pivoted_dimension_name="generator",
@@ -485,21 +442,16 @@ def test_map_datetime_to_datetime(
         time_array_id_columns=["generator"],
         value_column="value",
     )
-    if store.engine.name == "hive":
-        out_file = tmp_path / "data.parquet"
-        rel2.to_df().to_parquet(out_file)
-        store.create_view_from_parquet(out_file, src_schema)
-    else:
-        store.ingest_table(rel2, src_schema)
+    store.ingest_table(rel2, src_schema)
 
-    if tzinfo is None and store.engine.name != "sqlite":
+    if tzinfo is None and store.backend.name != "sqlite":
         output_file = tmp_path / "mapped_data"
     else:
         output_file = None
     store.map_table_time_config(
         src_schema.name, dst_schema, output_file=output_file, check_mapped_timestamps=True
     )
-    if output_file is None or store.engine.name == "sqlite":
+    if output_file is None or store.backend.name == "sqlite":
         df2 = store.read_table(dst_schema.name)
     else:
         df2 = pd.read_parquet(output_file)
@@ -557,14 +509,9 @@ def test_map_index_time_to_datetime(
             for i, time_zone in enumerate(time_zones)
         ]
     )
-    if store.engine.name == "hive":
-        out_file = tmp_path / "data.parquet"
-        src_df.to_parquet(out_file)
-        store.create_view_from_parquet(out_file, src_schema)
-    else:
-        store.ingest_table(src_df, src_schema)
+    store.ingest_table(src_df, src_schema)
 
-    if store.engine.name != "sqlite":
+    if store.backend.name != "sqlite":
         output_file = tmp_path / "mapped_data"
     else:
         output_file = None
@@ -578,7 +525,7 @@ def test_map_index_time_to_datetime(
             daylight_saving_adjustment=DaylightSavingAdjustmentType.DROP_SPRING_FORWARD_DUPLICATE_FALLBACK
         ),
     )
-    if output_file is None or store.engine.name == "sqlite":
+    if output_file is None or store.backend.name == "sqlite":
         result = store.read_table(dst_schema.name)
     else:
         result = pd.read_parquet(output_file)
@@ -611,77 +558,72 @@ def test_to_parquet(tmp_path, generators_schema):
     store = Store()
     store.ingest_from_csv(src_file, src_schema, dst_schema)
     filename = tmp_path / "data.parquet"
-    table = Table(dst_schema.name, store.metadata)
-    stmt = select(table).where(table.c.generator == "gen2")
+    table = store.get_table(dst_schema.name)
+    stmt = table.filter(table.generator == "gen2")
     store.write_query_to_parquet(stmt, filename, overwrite=True)
     assert filename.exists()
     df = pd.read_parquet(filename)
     assert len(df) == 8784
 
 
-def test_load_existing_store(iter_engines_file, one_week_per_month_by_hour_table):
-    engine = iter_engines_file
+def test_load_existing_store(iter_backends_file, one_week_per_month_by_hour_table):
+    backend, backend_name = iter_backends_file
     df, _, schema = one_week_per_month_by_hour_table
-    store = Store(engine=engine)
+    store = Store(backend=backend)
     store.ingest_table(df, schema)
     df2 = store.read_table(schema.name)
     assert df2.equals(df)
-    file_path = Path(engine.url.database)
+    file_path = Path(backend.database)
     assert file_path.exists()
-    store2 = Store.load_from_file(engine_name=engine.name, file_path=file_path)
+    store2 = Store.load_from_file(backend_name=backend_name, file_path=file_path)
     df3 = store2.read_table(schema.name)
     assert df3.equals(df2)
     with pytest.raises(FileNotFoundError):
-        Store.load_from_file(engine_name=engine.name, file_path="./invalid/path")
+        Store.load_from_file(backend_name=backend_name, file_path="./invalid/path")
 
 
-def test_create_methods(iter_engine_names, tmp_path):
+def test_create_methods(iter_backend_names, tmp_path):
     path = tmp_path / "data.db"
     assert not path.exists()
-    Store.create_file_db(engine_name=iter_engine_names, file_path=path)
+    Store.create_file_db(backend_name=iter_backend_names, file_path=path)
     gc.collect()
     assert path.exists()
     with pytest.raises(InvalidOperation):
-        Store.create_file_db(engine_name=iter_engine_names, file_path=path)
-    Store.create_file_db(engine_name=iter_engine_names, file_path=path, overwrite=True)
-    Store.create_in_memory_db(engine_name=iter_engine_names)
+        Store.create_file_db(backend_name=iter_backend_names, file_path=path)
+    Store.create_file_db(backend_name=iter_backend_names, file_path=path, overwrite=True)
+    Store.create_in_memory_db(backend_name=iter_backend_names)
 
 
-def test_invalid_hive_url():
-    with pytest.raises(InvalidParameter):
-        Store.create_new_hive_store("duckdb:///:memory:")
+def test_invalid_backend():
+    with pytest.raises(ValueError):
+        Store(backend_name="hive")
 
 
-def test_invalid_engine():
-    with pytest.raises(NotImplementedError):
-        Store(engine_name="hive")
-
-
-def test_create_with_existing_engine():
-    engine = create_engine("duckdb:///:memory:")
-    store = Store(engine=engine)
-    assert store.engine is engine
+def test_create_with_existing_backend():
+    backend = make_backend("duckdb")
+    store = Store(backend=backend)
+    assert store.backend is backend
 
 
 def test_create_with_sqlite():
-    Store(engine_name="sqlite")
+    Store(backend_name="sqlite")
 
 
 def test_create_with_conflicting_parameters():
     with pytest.raises(ConflictingInputsError):
-        Store(engine=create_engine("duckdb:///:memory:"), engine_name="duckdb")
+        Store(backend=make_backend("duckdb"), backend_name="duckdb")
 
 
-def test_backup(iter_engines_file: Engine, one_week_per_month_by_hour_table, tmp_path):
-    engine = iter_engines_file
+def test_backup(iter_backends_file, one_week_per_month_by_hour_table, tmp_path):
+    backend, backend_name = iter_backends_file
     df, _, schema = one_week_per_month_by_hour_table
-    store = Store(engine=engine)
+    store = Store(backend=backend)
     store.ingest_table(df, schema)
     dst_file = tmp_path / "backup.db"
     assert not dst_file.exists()
     store.backup(dst_file)
     assert dst_file.exists()
-    store2 = Store(engine_name=engine.name, file_path=dst_file)
+    store2 = Store(backend_name=backend_name, file_path=dst_file)
     df2 = store2.read_table(schema.name)
     assert df2.equals(df)
 
@@ -697,9 +639,9 @@ def test_backup(iter_engines_file: Engine, one_week_per_month_by_hour_table, tmp
 
 
 def test_backup_not_allowed(one_week_per_month_by_hour_table, tmp_path):
-    engine = create_engine("duckdb:///:memory:")
+    backend = make_backend("duckdb")
     df, _, schema = one_week_per_month_by_hour_table
-    store = Store(engine=engine)
+    store = Store(backend=backend)
     store.ingest_table(df, schema)
     dst_file = tmp_path / "backup.db"
     assert not dst_file.exists()
@@ -720,8 +662,7 @@ def test_delete_rows(iter_stores_by_engine: Store, one_week_per_month_by_hour_ta
     store.delete_rows(schema.name, {"id": 2})
     df3 = store.read_table(schema.name)
     assert sorted(df3["id"].unique()) == [1, 3]
-    with store.engine.begin() as conn:
-        store.delete_rows(schema.name, {"id": 1}, connection=conn)
+    store.delete_rows(schema.name, {"id": 1})
     df4 = store.read_table(schema.name)
     assert sorted(df4["id"].unique()) == [3]
     store.delete_rows(schema.name, {"id": 3})
@@ -750,8 +691,8 @@ def test_drop_view(iter_stores_by_engine: Store, one_week_per_month_by_hour_tabl
     store = iter_stores_by_engine
     df, _, schema = one_week_per_month_by_hour_table
     store.ingest_table(df, schema)
-    table = Table(schema.name, store.metadata)
-    stmt = select(table).where(table.c.id == 1)
+    table = store.get_table(schema.name)
+    stmt = table.filter(table.id == 1)
     inputs = schema.model_dump()
     inputs["name"] = make_temp_view_name()
     schema2 = TableSchema(**inputs)
@@ -770,10 +711,8 @@ def test_read_raw_query(iter_stores_by_engine: Store, one_week_per_month_by_hour
     df2 = store.read_raw_query(query)
     assert df2.equals(df)
 
-    query = f"SELECT * FROM {schema.name} where id = ?"
-    params = (2,)
-    with store.engine.connect() as conn:
-        df2 = store.read_raw_query(query, params=params, connection=conn)
+    query = f"SELECT * FROM {schema.name} where id = 2"
+    df2 = store.read_raw_query(query)
     assert df2.equals(df[df["id"] == 2].reset_index(drop=True))
 
 
@@ -782,8 +721,6 @@ def test_check_timestamps(iter_stores_by_engine: Store, one_week_per_month_by_ho
     df, _, schema = one_week_per_month_by_hour_table
     store.ingest_table(df, schema)
     store.check_timestamps(schema.name)
-    with store.engine.begin() as conn:
-        store.check_timestamps(schema.name, connection=conn)
 
 
 @pytest.mark.parametrize("to_time_zone", [ZoneInfo("US/Eastern"), ZoneInfo("US/Mountain"), None])
@@ -806,10 +743,10 @@ def test_convert_time_zone(
     src_csv_schema = CsvTableSchema(
         time_config=src_time_config,
         column_dtypes=[
-            ColumnDType(name="timestamp", dtype=DateTime(timezone=False)),
-            ColumnDType(name="gen1", dtype=Double()),
-            ColumnDType(name="gen2", dtype=Double()),
-            ColumnDType(name="gen3", dtype=Double()),
+            ColumnDType(name="timestamp", dtype="datetime"),
+            ColumnDType(name="gen1", dtype="float"),
+            ColumnDType(name="gen2", dtype="float"),
+            ColumnDType(name="gen3", dtype="float"),
         ],
         value_columns=["gen1", "gen2", "gen3"],
         pivoted_dimension_name="generator",
@@ -824,14 +761,9 @@ def test_convert_time_zone(
         time_array_id_columns=["generator"],
         value_column="value",
     )
-    if store.engine.name == "hive":
-        out_file = tmp_path / "data.parquet"
-        rel2.to_df().to_parquet(out_file)
-        store.create_view_from_parquet(out_file, src_schema)
-    else:
-        store.ingest_table(rel2, src_schema)
+    store.ingest_table(rel2, src_schema)
 
-    if tzinfo is None and store.engine.name != "sqlite":
+    if tzinfo is None and store.backend.name != "sqlite":
         output_file = tmp_path / "mapped_data"
     else:
         output_file = None
@@ -839,7 +771,7 @@ def test_convert_time_zone(
     dst_schema = store.convert_time_zone(
         src_schema.name, to_time_zone, output_file=output_file, check_mapped_timestamps=True
     )
-    if output_file is None or store.engine.name == "sqlite":
+    if output_file is None or store.backend.name == "sqlite":
         df2 = store.read_table(dst_schema.name)
     else:
         df2 = pd.read_parquet(output_file)
@@ -878,10 +810,10 @@ def test_convert_time_zone_by_column(
     src_csv_schema = CsvTableSchema(
         time_config=src_time_config,
         column_dtypes=[
-            ColumnDType(name="timestamp", dtype=DateTime(timezone=False)),
-            ColumnDType(name="gen1", dtype=Double()),
-            ColumnDType(name="gen2", dtype=Double()),
-            ColumnDType(name="gen3", dtype=Double()),
+            ColumnDType(name="timestamp", dtype="datetime"),
+            ColumnDType(name="gen1", dtype="float"),
+            ColumnDType(name="gen2", dtype="float"),
+            ColumnDType(name="gen3", dtype="float"),
         ],
         value_columns=["gen1", "gen2", "gen3"],
         pivoted_dimension_name="generator",
@@ -901,14 +833,9 @@ def test_convert_time_zone_by_column(
         time_array_id_columns=["generator", "time_zone"],
         value_column="value",
     )
-    if store.engine.name == "hive":
-        out_file = tmp_path / "data.parquet"
-        rel2.to_df().to_parquet(out_file)
-        store.create_view_from_parquet(out_file, src_schema)
-    else:
-        store.ingest_table(rel2, src_schema)
+    store.ingest_table(rel2, src_schema)
 
-    if tzinfo is None and store.engine.name != "sqlite":
+    if tzinfo is None and store.backend.name != "sqlite":
         output_file = tmp_path / "mapped_data"
     else:
         output_file = None
@@ -920,7 +847,7 @@ def test_convert_time_zone_by_column(
         wrap_time_allowed=wrapped_time_allowed,
         check_mapped_timestamps=True,
     )
-    if output_file is None or store.engine.name == "sqlite":
+    if output_file is None or store.backend.name == "sqlite":
         df2 = store.read_table(dst_schema.name)
     else:
         df2 = pd.read_parquet(output_file)
@@ -962,10 +889,10 @@ def test_localize_time_zone(
     src_csv_schema = CsvTableSchema(
         time_config=src_time_config,
         column_dtypes=[
-            ColumnDType(name="timestamp", dtype=DateTime(timezone=False)),
-            ColumnDType(name="gen1", dtype=Double()),
-            ColumnDType(name="gen2", dtype=Double()),
-            ColumnDType(name="gen3", dtype=Double()),
+            ColumnDType(name="timestamp", dtype="datetime"),
+            ColumnDType(name="gen1", dtype="float"),
+            ColumnDType(name="gen2", dtype="float"),
+            ColumnDType(name="gen3", dtype="float"),
         ],
         value_columns=["gen1", "gen2", "gen3"],
         pivoted_dimension_name="generator",
@@ -980,14 +907,9 @@ def test_localize_time_zone(
         time_array_id_columns=["generator"],
         value_column="value",
     )
-    if store.engine.name == "hive":
-        out_file = tmp_path / "data.parquet"
-        rel2.to_df().to_parquet(out_file)
-        store.create_view_from_parquet(out_file, src_schema)
-    else:
-        store.ingest_table(rel2, src_schema)
+    store.ingest_table(rel2, src_schema)
 
-    if to_time_zone is None and store.engine.name != "sqlite":
+    if to_time_zone is None and store.backend.name != "sqlite":
         output_file = tmp_path / "mapped_data"
     else:
         output_file = None
@@ -998,7 +920,7 @@ def test_localize_time_zone(
         output_file=output_file,
         check_mapped_timestamps=True,
     )
-    if output_file is None or store.engine.name == "sqlite":
+    if output_file is None or store.backend.name == "sqlite":
         df2 = store.read_table(dst_schema.name)
     else:
         df2 = pd.read_parquet(output_file)
@@ -1036,10 +958,10 @@ def test_localize_time_zone_by_column(tmp_path, iter_stores_by_engine_no_data_in
     src_csv_schema = CsvTableSchema(
         time_config=src_time_config,
         column_dtypes=[
-            ColumnDType(name="timestamp", dtype=DateTime(timezone=False)),
-            ColumnDType(name="gen1", dtype=Double()),
-            ColumnDType(name="gen2", dtype=Double()),
-            ColumnDType(name="gen3", dtype=Double()),
+            ColumnDType(name="timestamp", dtype="datetime"),
+            ColumnDType(name="gen1", dtype="float"),
+            ColumnDType(name="gen2", dtype="float"),
+            ColumnDType(name="gen3", dtype="float"),
         ],
         value_columns=["gen1", "gen2", "gen3"],
         pivoted_dimension_name="generator",
@@ -1059,14 +981,9 @@ def test_localize_time_zone_by_column(tmp_path, iter_stores_by_engine_no_data_in
         time_array_id_columns=["generator", "time_zone"],
         value_column="value",
     )
-    if store.engine.name == "hive":
-        out_file = tmp_path / "data.parquet"
-        rel2.to_df().to_parquet(out_file)
-        store.create_view_from_parquet(out_file, src_schema)
-    else:
-        store.ingest_table(rel2, src_schema)
+    store.ingest_table(rel2, src_schema)
 
-    if store.engine.name != "sqlite":
+    if store.backend.name != "sqlite":
         output_file = tmp_path / "mapped_data"
     else:
         output_file = None
@@ -1077,7 +994,7 @@ def test_localize_time_zone_by_column(tmp_path, iter_stores_by_engine_no_data_in
         output_file=output_file,
         check_mapped_timestamps=True,
     )
-    if output_file is None or store.engine.name == "sqlite":
+    if output_file is None or store.backend.name == "sqlite":
         df2 = store.read_table(dst_schema.name)
     else:
         df2 = pd.read_parquet(output_file)

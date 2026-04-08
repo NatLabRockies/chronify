@@ -1,0 +1,121 @@
+"""SQLite backend implementation for Ibis."""
+
+from pathlib import Path
+
+import ibis
+import ibis.expr.types as ir
+import pandas as pd
+import pyarrow as pa
+from loguru import logger
+
+from chronify.ibis.base import IbisBackend
+
+
+class SQLiteBackend(IbisBackend):
+    """Ibis backend for SQLite databases."""
+
+    def __init__(self, database: str | Path = ":memory:") -> None:
+        db = str(database)
+        self._database = None if db == ":memory:" else db
+        self._connection = ibis.sqlite.connect(db)
+
+    @property
+    def name(self) -> str:
+        return "sqlite"
+
+    @property
+    def database(self) -> str | None:
+        return self._database
+
+    @property
+    def connection(self) -> ibis.BaseBackend:
+        return self._connection
+
+    def create_table(
+        self,
+        name: str,
+        obj: pd.DataFrame | ir.Table | None = None,
+        schema: ibis.Schema | None = None,
+    ) -> ir.Table:
+        if isinstance(obj, ir.Table):
+            # SQLite CREATE TABLE AS SELECT loses datetime type info.
+            # Execute the expression first, then create from the DataFrame.
+            df = self._connection.execute(obj)
+            return self._connection.create_table(name, obj=df, overwrite=False)
+        return self._connection.create_table(name, obj=obj, schema=schema, overwrite=False)
+
+    def create_view(self, name: str, expr: ir.Table) -> ir.Table:
+        return self._connection.create_view(name, expr, overwrite=False)
+
+    def drop_table(self, name: str) -> None:
+        self._connection.drop_table(name, force=True)
+
+    def drop_view(self, name: str) -> None:
+        self._connection.drop_view(name, force=True)
+
+    def list_tables(self) -> list[str]:
+        return self._connection.list_tables()
+
+    def table(self, name: str) -> ir.Table:
+        return self._connection.table(name)
+
+    def insert(self, name: str, data: pd.DataFrame) -> None:
+        # Use raw SQLite cursor for parameterized inserts
+        con = self._connection.con  # raw sqlite3 connection
+        table = self._connection.table(name)
+        columns = table.columns
+        placeholders = ", ".join(["?"] * len(columns))
+        col_list = ", ".join(columns)
+        sql = f"INSERT INTO {name} ({col_list}) VALUES ({placeholders})"
+
+        arrow_table = pa.Table.from_pandas(data)
+        cursor = con.cursor()
+        for batch in arrow_table.to_batches():
+            rows = [tuple(row[col].as_py() for col in range(batch.num_columns)) for row in zip(*[batch.column(i) for i in range(batch.num_columns)])]
+            cursor.executemany(sql, rows)
+        con.commit()
+        logger.trace("Inserted {} rows into {}", len(data), name)
+
+    def execute(self, expr: ir.Expr) -> pd.DataFrame:
+        return self._connection.execute(expr)
+
+    def sql(self, query: str) -> ir.Table:
+        return self._connection.sql(query)
+
+    def write_parquet(
+        self,
+        expr: ir.Table,
+        path: str,
+        partition_by: list[str] | None = None,
+    ) -> None:
+        if partition_by:
+            msg = "SQLite backend does not support partitioned Parquet writes."
+            raise NotImplementedError(msg)
+        df = self._connection.execute(expr)
+        df.to_parquet(path)
+
+    def create_view_from_parquet(self, path: str, name: str) -> ir.Table:
+        # SQLite can't read Parquet natively. Load into a table instead.
+        df = pd.read_parquet(path)
+        return self.create_table(name, obj=df)
+
+    def execute_sql(self, query: str) -> None:
+        logger.trace("execute_sql: {}", query)
+        con = self._connection.con
+        con.execute(query)
+        con.commit()
+
+    def execute_sql_to_df(self, query: str) -> pd.DataFrame:
+        logger.trace("execute_sql_to_df: {}", query)
+        con = self._connection.con
+        cursor = con.execute(query)
+        rows = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description] if cursor.description else []
+        return pd.DataFrame(rows, columns=columns)
+
+    def dispose(self) -> None:
+        self._connection.disconnect()
+
+    def reconnect(self) -> None:
+        db = self._database if self._database else ":memory:"
+        self._connection = ibis.sqlite.connect(db)

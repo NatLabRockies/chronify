@@ -5,8 +5,9 @@ import numpy as np
 from datetime import datetime, timedelta
 
 import pandas as pd
-from sqlalchemy import Engine, MetaData, Table, select
 
+from chronify.ibis.base import IbisBackend
+from chronify.ibis.functions import read_query
 from chronify.models import TableSchema, MappingTableSchema
 from chronify.exceptions import InvalidParameter, ConflictingInputsError
 from chronify.time_series_mapper_base import TimeSeriesMapperBase, apply_mapping
@@ -20,7 +21,6 @@ from chronify.time_configs import (
 from chronify.time_range_generator_factory import make_time_range_generator
 from chronify.time_series_mapper_datetime import MapperDatetimeToDatetime
 from chronify.time import TimeDataType, TimeType, DaylightSavingAdjustmentType, AggregationType
-from chronify.sqlalchemy.functions import read_database
 
 logger = logging.getLogger(__name__)
 
@@ -28,17 +28,13 @@ logger = logging.getLogger(__name__)
 class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
     def __init__(
         self,
-        engine: Engine,
-        metadata: MetaData,
+        backend: IbisBackend,
         from_schema: TableSchema,
         to_schema: TableSchema,
         data_adjustment: Optional[TimeBasedDataAdjustment] = None,
         wrap_time_allowed: bool = False,
     ) -> None:
-        # TODO: refactor to use new time configs - Issue #64
-        super().__init__(
-            engine, metadata, from_schema, to_schema, data_adjustment, wrap_time_allowed
-        )
+        super().__init__(backend, from_schema, to_schema, data_adjustment, wrap_time_allowed)
         self._dst_adjustment = self._data_adjustment.daylight_saving_adjustment
         if not isinstance(self._from_schema.time_config, IndexTimeRangeBase):
             msg = "Source schema does not have IndexTimeRangeBase time config. Use a different mapper."
@@ -70,14 +66,12 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
 
     def map_time(
         self,
-        scratch_dir: Optional[Path] = None,
         output_file: Optional[Path] = None,
         check_mapped_timestamps: bool = False,
     ) -> None:
         """Convert from index time to its represented datetime"""
         self.check_schema_consistency()
 
-        # Convert from index time to its represented datetime
         if self._from_time_config.time_type == TimeType.INDEX_TZ_COL:
             if (
                 self._dst_adjustment
@@ -119,24 +113,19 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
             mapping_schema,
             self._from_schema,
             mapped_schema,
-            self._engine,
-            self._metadata,
+            self._backend,
             TimeBasedDataAdjustment(),
             resampling_operation=resampling_operation,
-            scratch_dir=scratch_dir,
             check_mapped_timestamps=False,
         )
 
-        # Convert from represented datetime to dst time_config
         MapperDatetimeToDatetime(
-            self._engine,
-            self._metadata,
+            self._backend,
             mapped_schema,
             self._to_schema,
             self._data_adjustment,
             self._wrap_time_allowed,
         ).map_time(
-            scratch_dir=scratch_dir,
             output_file=output_file,
             check_mapped_timestamps=check_mapped_timestamps,
         )
@@ -167,8 +156,6 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
         )
         time_kwargs["time_type"] = TimeType.DATETIME
         if isinstance(self._from_time_config.start_timestamp, datetime):
-            # TODO: this is a hack. datetime is correct but only is present when Hive is used.
-            # The code requires pandas Timestamps.
             time_kwargs["start"] = pd.Timestamp(self._from_time_config.start_timestamp)
         else:
             time_kwargs["start"] = self._from_time_config.start_timestamp
@@ -219,10 +206,9 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
         assert tz_col is not None, "Expecting a time zone column for INDEX_TZ_COL"
         from_tz_col = "from_" + tz_col
 
-        with self._engine.connect() as conn:
-            table = Table(self._from_schema.name, self._metadata)
-            stmt = select(table.c[tz_col]).distinct().where(table.c[tz_col].is_not(None))
-            time_zones = read_database(stmt, conn, self._from_time_config)[tz_col].to_list()
+        table = self._backend.table(self._from_schema.name)
+        expr = table.select(tz_col).distinct().filter(table[tz_col].notnull())
+        time_zones = read_query(self._backend, expr, self._from_time_config)[tz_col].to_list()
 
         from_time_config = self._from_time_config.model_copy(
             update={"time_column": from_time_col, "time_zone_column": from_tz_col}
@@ -234,8 +220,6 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
         for time_zone in time_zones:
             config_tz = self._create_local_time_config(time_zone)
             time_data = make_time_range_generator(config_tz).list_timestamps()
-            # Preemptively convert to dst time tzinfo, otherwise pandas treats the col,
-            # which consists of the timeseries of different time zones, as an object col
             mapped_time_data = [x.tz_convert(to_tz) for x in time_data]
             df_tz.append(
                 pd.DataFrame(
@@ -248,7 +232,6 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
             )
         df = pd.concat(df_tz, ignore_index=True)
 
-        # Update mapped_schema
         mapped_schema.time_config.start = df[mapped_time_col].min()
         mapped_schema.time_config.length = df[mapped_time_col].nunique()
         mapped_schema.time_config.dtype = TimeDataType.TIMESTAMP_TZ
@@ -264,10 +247,7 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
         interpolate_fallback: bool = False,
     ) -> tuple[pd.DataFrame, MappingTableSchema, TableSchema]:
         """Create mapping dataframe for converting INDEX_TZ_COL time to its represented datetime
-        with time-based daylight_saving adjustment that
-        drops the spring-forward hour and, per user input,
-        interpolates or duplicates the fall-back hour
-        """
+        with time-based daylight_saving adjustment."""
         mapped_schema = self._create_intermediate_schema()
         assert isinstance(mapped_schema.time_config, DatetimeRange)
         mapped_time_col = mapped_schema.time_config.time_column
@@ -290,10 +270,9 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
         assert tz_col is not None, "Expecting a time zone column for INDEX_TZ_COL"
         from_tz_col = "from_" + tz_col
 
-        with self._engine.connect() as conn:
-            table = Table(self._from_schema.name, self._metadata)
-            stmt = select(table.c[tz_col]).distinct().where(table.c[tz_col].is_not(None))
-            time_zones = read_database(stmt, conn, self._from_time_config)[tz_col].to_list()
+        table = self._backend.table(self._from_schema.name)
+        expr = table.select(tz_col).distinct().filter(table[tz_col].notnull())
+        time_zones = read_query(self._backend, expr, self._from_time_config)[tz_col].to_list()
 
         from_time_config = self._from_time_config.model_copy(
             update={"time_column": from_time_col, "time_zone_column": from_tz_col}
@@ -314,7 +293,6 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
         df = pd.concat(df_tz, ignore_index=True)
         df = df.merge(df_ntz, on="clock_time").drop(columns=["clock_time"])
 
-        # Update mapped_schema
         mapped_schema.time_config.start = df[mapped_time_col].min()
         mapped_schema.time_config.length = df[mapped_time_col].nunique()
         mapped_schema.time_config.dtype = TimeDataType.TIMESTAMP_TZ
@@ -330,17 +308,14 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
     ) -> pd.DataFrame:
         config_tz = self._create_local_time_config(time_zone)
         time_data = make_time_range_generator(config_tz).list_timestamps()
-        # Extract clock time
         clock_time_data = [x.strftime("%Y-%m-%d %H:%M:%S") for x in time_data]
-        # Preemptively convert to dst time tzinfo, otherwise pandas treats the col,
-        # which consists of the timeseries of different time zones, as an object col
         to_tz = self._to_time_config.start.tzinfo
         mapped_time_data = [x.tz_convert(to_tz) for x in time_data]
 
         df_map = pd.DataFrame(
             {
                 from_tz_col: time_zone,
-                "clock_time": clock_time_data,  # str, mapping key
+                "clock_time": clock_time_data,
                 mapped_time_col: mapped_time_data,
             }
         )
@@ -351,16 +326,13 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
     ) -> pd.DataFrame:
         config_tz = self._create_local_time_config(time_zone)
         time_data = make_time_range_generator(config_tz).list_timestamps()
-        # Extract clock time
         clock_time_data = [x.strftime("%Y-%m-%d %H:%M:%S") for x in time_data]
-        # Preemptively convert to dst time tzinfo, otherwise pandas treats the col,
-        # which consists of the timeseries of different time zones, as an object col
         to_tz = self._to_time_config.start.tzinfo
         mapped_time_data = [x.tz_convert(to_tz) for x in time_data]
 
         df_map = pd.DataFrame(
             {
-                "clock_time": clock_time_data,  # str, mapping key
+                "clock_time": clock_time_data,
                 mapped_time_col: mapped_time_data,
                 "factor": 1,
             }
@@ -369,25 +341,21 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
         assert (limit % 1 == 0) and (limit > 0), f"limit must be an integer, {limit}"
         limit = int(limit)
 
-        # create interpolation map by locating where timestamp is duplicated
         cond = df_map["clock_time"].duplicated()
         df_map.loc[cond, "clock_time"] = np.nan
         df_map.loc[cond, "factor"] = np.nan
         df_map["lb"] = df_map["clock_time"].ffill(limit=limit).where(df_map["clock_time"].isna())
         df_map["ub"] = df_map["clock_time"].bfill(limit=limit).where(df_map["clock_time"].isna())
 
-        # calculate ub_factor by counting consecutive values in ub
         x = ~df_map["ub"].isna()
         consecutive_count = x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1)
         df_map["ub_factor"] = consecutive_count.replace(0, np.nan) / (limit + 1)
         df_map["lb_factor"] = 1 - df_map["ub_factor"]
 
-        # capping: if a row do not have both lb and ub, cannot interpolate, set factor to 1
         for fact_col in ["lb_factor", "ub_factor"]:
             cond = ~(df_map[fact_col].where(df_map["lb"].isna() | df_map["ub"].isna()).isna())
             df_map.loc[cond, fact_col] = 1
 
-        # finalize table by reducing columns
         lst = []
         for ts_col, fact_col in zip(
             ["clock_time", "lb", "ub"], ["factor", "lb_factor", "ub_factor"]

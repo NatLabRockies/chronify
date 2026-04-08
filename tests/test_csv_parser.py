@@ -37,19 +37,19 @@ def time_series_NYMDPV():
     return temp_csv_file(header + data)
 
 
-def test_NMDH_parser(time_series_NMDH, iter_engines):
-    store = Store(iter_engines)
+def test_NMDH_parser(time_series_NMDH, iter_backends):
+    store = Store(backend=iter_backends)
     parser = CsvTimeSeriesParser(store)
     parser.ingest_to_datetime(time_series_NMDH, "test_NMDH", 2023, 48)
 
 
-def test_NYMDH_parser(time_series_NYMDH, iter_engines):
-    store = Store(iter_engines)
+def test_NYMDH_parser(time_series_NYMDH, iter_backends):
+    store = Store(backend=iter_backends)
     parser = CsvTimeSeriesParser(store)
     parser.ingest_to_datetime(time_series_NYMDH, "test_NYMDH", 2025, 48)
 
 
-def test_NYMDPV_parser(time_series_NYMDPV, iter_engines):
-    store = Store(iter_engines)
+def test_NYMDPV_parser(time_series_NYMDPV, iter_backends):
+    store = Store(backend=iter_backends)
     parser = CsvTimeSeriesParser(store)
     parser.ingest_to_datetime(time_series_NYMDPV, "test_NYMDPV", 2025, 24)
