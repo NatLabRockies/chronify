@@ -99,8 +99,12 @@ class IbisBackend(ABC):
         """Write an ibis expression result to a Parquet file."""
 
     @abstractmethod
-    def create_view_from_parquet(self, path: str, name: str) -> ir.Table:
-        """Create a view or table backed by a Parquet file."""
+    def create_view_from_parquet(self, path: str, name: str) -> tuple[ir.Table, ObjectType]:
+        """Create a view or table backed by a Parquet file.
+
+        Returns the table expression and the type of object created, since some
+        backends (e.g., SQLite) must create a table instead of a view.
+        """
 
     def has_table(self, name: str) -> bool:
         """Check whether a table or view exists."""

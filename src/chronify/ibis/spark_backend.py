@@ -7,7 +7,7 @@ import ibis.expr.types as ir
 import pandas as pd
 from loguru import logger
 
-from chronify.ibis.base import IbisBackend
+from chronify.ibis.base import IbisBackend, ObjectType
 
 
 class SparkBackend(IbisBackend):
@@ -97,10 +97,10 @@ class SparkBackend(IbisBackend):
         else:
             df.to_parquet(path)
 
-    def create_view_from_parquet(self, path: str, name: str) -> ir.Table:
+    def create_view_from_parquet(self, path: str, name: str) -> tuple[ir.Table, ObjectType]:
         spark_df = self._session.read.parquet(path)
         spark_df.createOrReplaceTempView(name)
-        return self.table(name)
+        return self.table(name), ObjectType.VIEW
 
     def execute_sql(self, query: str) -> None:
         logger.trace("execute_sql: {}", query)

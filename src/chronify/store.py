@@ -20,7 +20,7 @@ from chronify.exceptions import (
     TableNotStored,
 )
 from chronify.csv_io import read_csv
-from chronify.ibis import IbisBackend, make_backend
+from chronify.ibis import IbisBackend, ObjectType, make_backend
 from chronify.ibis.functions import (
     create_view_from_parquet,
     read_query,
@@ -177,18 +177,24 @@ class Store:
         self, path: Path, schema: TableSchema, bypass_checks: bool = False
     ) -> None:
         """Load a table into the database from a Parquet file."""
-        self._create_view_from_parquet(path, schema)
+        obj_type = self._create_view_from_parquet(path, schema)
         try:
             if not bypass_checks:
                 check_timestamps(self._backend, schema.name, schema)
         except InvalidTable:
-            self.drop_view(schema.name)
+            if obj_type == ObjectType.TABLE:
+                self._backend.drop_table(schema.name)
+            else:
+                self._backend.drop_view(schema.name)
             raise
 
-    def _create_view_from_parquet(self, path: Path | str, schema: TableSchema) -> None:
+    def _create_view_from_parquet(
+        self, path: Path | str, schema: TableSchema
+    ) -> "ObjectType":
         """Create a view in the database from a Parquet file."""
-        create_view_from_parquet(self._backend, to_path(path), schema.name)
+        obj_type = create_view_from_parquet(self._backend, to_path(path), schema.name)
         self._schema_mgr.add_schema(schema)
+        return obj_type
 
     def ingest_from_csv(
         self,
@@ -275,6 +281,7 @@ class Store:
         except Exception:
             if self._backend.has_table(dst_schema.name):
                 self._backend.drop_table(dst_schema.name)
+                self._schema_mgr.remove_schema(dst_schema.name)
             raise
         return created_table
 
@@ -356,6 +363,7 @@ class Store:
         except Exception:
             if self._backend.has_table(schema.name):
                 self._backend.drop_table(schema.name)
+                self._schema_mgr.remove_schema(schema.name)
             raise
         return created_table
 

@@ -7,7 +7,7 @@ import ibis.expr.types as ir
 import pandas as pd
 from loguru import logger
 
-from chronify.ibis.base import IbisBackend
+from chronify.ibis.base import IbisBackend, ObjectType
 
 
 class DuckDBBackend(IbisBackend):
@@ -57,9 +57,15 @@ class DuckDBBackend(IbisBackend):
 
     def insert(self, name: str, data: pd.DataFrame) -> None:
         con = self._connection.con  # raw duckdb connection
-        con.register("__insert_df", data)
+        target_columns = list(self.table(name).columns)
+        ordered_data = data.reindex(columns=target_columns)
+        quoted_columns = ", ".join(f'"{col}"' for col in target_columns)
+        con.register("__insert_df", ordered_data)
         try:
-            con.execute(f"INSERT INTO {name} SELECT * FROM __insert_df")
+            con.execute(
+                f"INSERT INTO {name} ({quoted_columns}) "
+                f"SELECT {quoted_columns} FROM __insert_df"
+            )
         finally:
             con.unregister("__insert_df")
         logger.trace("Inserted {} rows into {}", len(data), name)
@@ -86,11 +92,16 @@ class DuckDBBackend(IbisBackend):
             df = self._connection.execute(expr)
             df.to_parquet(path)
 
-    def create_view_from_parquet(self, path: str, name: str) -> ir.Table:
+    def create_view_from_parquet(self, path: str, name: str) -> tuple[ir.Table, ObjectType]:
+        parquet_path = Path(path)
+        if parquet_path.is_dir():
+            read_path = str(parquet_path / "**" / "*.parquet").replace("\\", "/")
+        else:
+            read_path = str(parquet_path).replace("\\", "/")
         self._connection.raw_sql(
-            f"CREATE VIEW {name} AS SELECT * FROM read_parquet('{path}')"
+            f"CREATE VIEW {name} AS SELECT * FROM read_parquet('{read_path}')"
         )
-        return self.table(name)
+        return self.table(name), ObjectType.VIEW
 
     def execute_sql(self, query: str) -> None:
         logger.trace("execute_sql: {}", query)

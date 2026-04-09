@@ -24,7 +24,9 @@ def create_duckdb_backend() -> IbisBackend:
 @pytest.fixture(params=BACKEND_NAMES)
 def iter_backends(request) -> Generator[IbisBackend, None, None]:
     """Return an iterable of in-memory backends to test."""
-    yield make_backend(request.param)
+    backend = make_backend(request.param)
+    yield backend
+    backend.dispose()
 
 
 @pytest.fixture(params=BACKEND_NAMES)
@@ -42,6 +44,7 @@ def iter_stores_by_engine_no_data_ingestion(request) -> Generator[Store, None, N
     backend = make_backend(request.param)
     store = Store(backend=backend)
     yield store
+    store.dispose()
 
 
 @pytest.fixture(params=BACKEND_NAMES)
@@ -50,6 +53,7 @@ def iter_backends_file(request, tmp_path) -> Generator[tuple[IbisBackend, str], 
     file_path = tmp_path / "store.db"
     backend = make_backend(request.param, database=str(file_path))
     yield backend, request.param
+    backend.dispose()
 
 
 @pytest.fixture(params=BACKEND_NAMES)

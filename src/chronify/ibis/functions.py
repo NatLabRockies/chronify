@@ -10,7 +10,7 @@ import pyarrow as pa
 from pandas import DatetimeTZDtype
 
 from chronify.exceptions import InvalidOperation, InvalidParameter
-from chronify.ibis.base import IbisBackend
+from chronify.ibis.base import IbisBackend, ObjectType
 from chronify.time import TimeDataType
 from chronify.time_configs import (
     DatetimeRange,
@@ -99,9 +99,13 @@ def create_view_from_parquet(
     backend: IbisBackend,
     filename: Path,
     view_name: str,
-) -> None:
-    """Create a view from a Parquet file."""
-    backend.create_view_from_parquet(str(filename), view_name)
+) -> ObjectType:
+    """Create a view (or table for SQLite) from a Parquet file.
+
+    Returns the ObjectType created so callers can clean up correctly.
+    """
+    _, obj_type = backend.create_view_from_parquet(str(filename), view_name)
+    return obj_type
 
 
 def _check_one_config_per_datetime_column(configs: Sequence[TimeBaseModel]) -> None:

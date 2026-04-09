@@ -8,7 +8,7 @@ import pandas as pd
 import pyarrow as pa
 from loguru import logger
 
-from chronify.ibis.base import IbisBackend
+from chronify.ibis.base import IbisBackend, ObjectType
 
 
 class SQLiteBackend(IbisBackend):
@@ -94,10 +94,10 @@ class SQLiteBackend(IbisBackend):
         df = self._connection.execute(expr)
         df.to_parquet(path)
 
-    def create_view_from_parquet(self, path: str, name: str) -> ir.Table:
+    def create_view_from_parquet(self, path: str, name: str) -> tuple[ir.Table, ObjectType]:
         # SQLite can't read Parquet natively. Load into a table instead.
         df = pd.read_parquet(path)
-        return self.create_table(name, obj=df)
+        return self.create_table(name, obj=df), ObjectType.TABLE
 
     def execute_sql(self, query: str) -> None:
         logger.trace("execute_sql: {}", query)

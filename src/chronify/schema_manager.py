@@ -29,6 +29,10 @@ class SchemaManager:
 
         schema = ibis.schema({"name": "string", "schema": "string"})
         self._backend.create_table(self.SCHEMAS_TABLE, schema=schema)
+        self._backend.execute_sql(
+            f"CREATE UNIQUE INDEX idx_{self.SCHEMAS_TABLE}_name "
+            f"ON {self.SCHEMAS_TABLE} (name)"
+        )
 
     def add_schema(self, schema: TableSchema) -> None:
         """Add the schema to the store."""
@@ -52,7 +56,10 @@ class SchemaManager:
 
     def remove_schema(self, name: str) -> None:
         """Remove the schema from the store."""
-        self._backend.execute_sql(f"DELETE FROM {self.SCHEMAS_TABLE} WHERE name = '{name}'")
+        safe_name = name.replace("'", "''")
+        self._backend.execute_sql(
+            f"DELETE FROM {self.SCHEMAS_TABLE} WHERE name = '{safe_name}'"
+        )
         self._cache.pop(name, None)
 
     def rebuild_cache(self) -> None:

@@ -5,7 +5,7 @@ from typing import Any, Optional
 import pandas as pd
 from loguru import logger
 
-from chronify.ibis.base import IbisBackend
+from chronify.ibis.base import IbisBackend, ObjectType
 from chronify.ibis.functions import write_parquet, write_table, create_view_from_parquet
 from chronify.models import TableSchema, MappingTableSchema
 from chronify.exceptions import ConflictingInputsError, InvalidOperation
@@ -94,7 +94,7 @@ def apply_mapping(
         mapping_schema.time_configs,
         if_exists="fail",
     )
-    created_tmp_view = False
+    created_tmp_obj: Optional[ObjectType] = None
     try:
         _apply_mapping(
             mapping_schema.name,
@@ -107,8 +107,9 @@ def apply_mapping(
         if check_mapped_timestamps:
             if output_file is not None:
                 output_file = to_path(output_file)
-                create_view_from_parquet(backend, output_file, to_schema.name)
-                created_tmp_view = True
+                created_tmp_obj = create_view_from_parquet(
+                    backend, output_file, to_schema.name
+                )
             try:
                 check_timestamps(
                     backend,
@@ -127,8 +128,11 @@ def apply_mapping(
     finally:
         if backend.has_table(mapping_schema.name):
             backend.drop_table(mapping_schema.name)
-        if created_tmp_view:
-            backend.drop_view(to_schema.name)
+        if created_tmp_obj is not None:
+            if created_tmp_obj == ObjectType.TABLE:
+                backend.drop_table(to_schema.name)
+            else:
+                backend.drop_view(to_schema.name)
 
 
 def _apply_mapping(  # noqa: C901
