@@ -1,6 +1,7 @@
 """DuckDB backend implementation for Ibis."""
 
 from pathlib import Path
+from typing import Any, cast
 
 import ibis
 import ibis.expr.types as ir
@@ -60,18 +61,27 @@ class DuckDBBackend(IbisBackend):
         target_columns = list(self.table(name).columns)
         ordered_data = data.reindex(columns=target_columns)
         quoted_columns = ", ".join(f'"{col}"' for col in target_columns)
+        quoted_name = _quote_identifier(name)
         con.register("__insert_df", ordered_data)
         try:
             con.execute(
-                f"INSERT INTO {name} ({quoted_columns}) "
+                f"INSERT INTO {quoted_name} ({quoted_columns}) "
                 f"SELECT {quoted_columns} FROM __insert_df"
             )
         finally:
             con.unregister("__insert_df")
         logger.trace("Inserted {} rows into {}", len(data), name)
 
+    def delete_rows(self, name: str, values: dict[str, Any]) -> None:
+        con = self._connection.con
+        quoted_name = _quote_identifier(name)
+        where = " AND ".join(f"{_quote_identifier(c)} = ?" for c in values)
+        sql = f"DELETE FROM {quoted_name} WHERE {where}"
+        con.execute(sql, list(values.values()))
+        logger.trace("Deleted rows from {} matching {}", name, values)
+
     def execute(self, expr: ir.Expr) -> pd.DataFrame:
-        return self._connection.execute(expr)
+        return cast(pd.DataFrame, self._connection.execute(expr))
 
     def sql(self, query: str) -> ir.Table:
         return self._connection.sql(query)
@@ -89,8 +99,7 @@ class DuckDBBackend(IbisBackend):
                 f"COPY ({sql}) TO '{path}' (FORMAT PARQUET, PARTITION_BY ({partition_clause}))"
             )
         else:
-            df = self._connection.execute(expr)
-            df.to_parquet(path)
+            expr.to_parquet(path)
 
     def create_view_from_parquet(self, path: str, name: str) -> tuple[ir.Table, ObjectType]:
         parquet_path = Path(path)
@@ -110,7 +119,7 @@ class DuckDBBackend(IbisBackend):
     def execute_sql_to_df(self, query: str) -> pd.DataFrame:
         logger.trace("execute_sql_to_df: {}", query)
         result = self._connection.raw_sql(query)
-        return result.fetch_df()
+        return cast(pd.DataFrame, result.fetch_df())
 
     def dispose(self) -> None:
         self._connection.disconnect()
@@ -120,3 +129,9 @@ class DuckDBBackend(IbisBackend):
             self._connection = ibis.duckdb.connect(self._database)
         else:
             logger.warning("Cannot reconnect to an in-memory DuckDB database.")
+
+
+def _quote_identifier(identifier: str) -> str:
+    """Quote a SQL identifier for DuckDB, escaping embedded double quotes."""
+    escaped = identifier.replace('"', '""')
+    return f'"{escaped}"'

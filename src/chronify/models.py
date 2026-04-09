@@ -10,7 +10,7 @@ from typing_extensions import Annotated
 
 from chronify.base_models import ChronifyBaseModel
 from chronify.exceptions import InvalidValue
-from chronify.ibis.types import get_ibis_type_from_duckdb, get_duckdb_type_from_ibis
+from chronify.ibis.types import get_ibis_type_from_duckdb, get_ibis_type_from_string, get_duckdb_type_from_ibis
 from chronify.time_configs import TimeConfig
 
 
@@ -143,18 +143,6 @@ class MappingTableSchema(ChronifyBaseModel):
         return time_columns
 
 
-_COLUMN_TYPES: dict[str, type[dt.DataType]] = {
-    "bool": dt.Boolean,
-    "datetime": dt.Timestamp,
-    "float": dt.Float64,
-    "int": dt.Int64,
-    "bigint": dt.Int64,
-    "str": dt.String,
-}
-
-_DB_TYPES = set(_COLUMN_TYPES.values())
-
-
 def get_ibis_type_from_duckdb_pytype(duckdb_type: DuckDBPyType) -> dt.DataType:
     """Return the ibis type for a duckdb type."""
     return get_ibis_type_from_duckdb(str(duckdb_type))
@@ -192,12 +180,10 @@ class ColumnDType(ChronifyBaseModel):
             return data
 
         if isinstance(dtype, str):
-            val = _COLUMN_TYPES.get(dtype)
-            if val is None:
-                options = sorted(_COLUMN_TYPES.keys())
-                msg = f"{dtype=} must be one of {options}"
-                raise InvalidValue(msg)
-            data["dtype"] = val()
+            try:
+                data["dtype"] = get_ibis_type_from_string(dtype)
+            except ValueError as err:
+                raise InvalidValue(str(err)) from err
         else:
             msg = (
                 f"dtype is an unsupported type: {type(dtype)}. It must be a str or ibis DataType."

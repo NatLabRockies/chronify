@@ -136,16 +136,19 @@ class Store:
 
     def backup(self, dst: Path | str, overwrite: bool = False) -> None:
         """Copy the database to a new location. Not yet supported for in-memory databases."""
-        self._backend.dispose()
-        path = to_path(dst)
-        check_overwrite(path, overwrite)
         if self._backend.database is None:
             msg = "backup is only supported with a database backed by a file"
             raise InvalidOperation(msg)
+        path = to_path(dst)
+        check_overwrite(path, overwrite)
         src_file = Path(self._backend.database)
-        shutil.copyfile(src_file, path)
+
+        self._backend.dispose()
+        try:
+            shutil.copyfile(src_file, path)
+        finally:
+            self._backend.reconnect()
         logger.info("Copied database to {}", path)
-        self._backend.reconnect()
 
     @property
     def backend(self) -> IbisBackend:
@@ -212,10 +215,11 @@ class Store:
         dst_schema: TableSchema,
     ) -> bool:
         """Ingest data from multiple CSV files into the table specified by schema."""
+        table_existed = self._backend.has_table(dst_schema.name)
         try:
             created_table = self._ingest_from_csvs(paths, src_schema, dst_schema)
         except Exception:
-            if self._backend.has_table(dst_schema.name):
+            if not table_existed and self._backend.has_table(dst_schema.name):
                 self._backend.drop_table(dst_schema.name)
                 self._schema_mgr.remove_schema(dst_schema.name)
             raise
@@ -276,10 +280,11 @@ class Store:
         dst_schema: TableSchema,
     ) -> bool:
         """Ingest pivoted data from multiple tables. Unpivot before ingesting."""
+        table_existed = self._backend.has_table(dst_schema.name)
         try:
             created_table = self._ingest_pivoted_tables(data, src_schema, dst_schema)
         except Exception:
-            if self._backend.has_table(dst_schema.name):
+            if not table_existed and self._backend.has_table(dst_schema.name):
                 self._backend.drop_table(dst_schema.name)
                 self._schema_mgr.remove_schema(dst_schema.name)
             raise
@@ -358,10 +363,11 @@ class Store:
         if not data:
             return created_table
 
+        table_existed = self._backend.has_table(schema.name)
         try:
             created_table = self._ingest_tables(data, schema, **kwargs)
         except Exception:
-            if self._backend.has_table(schema.name):
+            if not table_existed and self._backend.has_table(schema.name):
                 self._backend.drop_table(schema.name)
                 self._schema_mgr.remove_schema(schema.name)
             raise
@@ -637,24 +643,16 @@ class Store:
             )
             raise InvalidParameter(msg)
 
-        # Count rows before delete
-        where_clauses = []
-        for column, value in time_array_id_values.items():
-            if isinstance(value, str):
-                where_clauses.append(f"{column} = '{value}'")
-            else:
-                where_clauses.append(f"{column} = {value}")
-        where_str = " AND ".join(where_clauses)
+        # Build the predicate using ibis (safe -- no string interpolation).
+        table = self._backend.table(name)
+        predicates = [table[column] == value for column, value in time_array_id_values.items()]
+        filtered = table.filter(predicates)
+        num_to_delete = int(filtered.count().execute())
 
-        count_df = self._backend.execute_sql_to_df(
-            f"SELECT COUNT(*) as cnt FROM {name} WHERE {where_str}"
-        )
-        num_to_delete = int(count_df.iloc[0, 0])
-
-        self._backend.execute_sql(f"DELETE FROM {name} WHERE {where_str}")
+        self._backend.delete_rows(name, time_array_id_values)
 
         if num_to_delete < 1:
-            msg = f"Failed to delete rows: {where_str} {num_to_delete=}"
+            msg = f"Failed to delete rows: {time_array_id_values} {num_to_delete=}"
             raise InvalidParameter(msg)
 
         logger.info(
@@ -664,8 +662,8 @@ class Store:
         )
 
         # Check if table is now empty
-        remaining = self._backend.execute_sql_to_df(f"SELECT COUNT(*) as cnt FROM {name}")
-        if int(remaining.iloc[0, 0]) == 0:
+        remaining = int(self._backend.table(name).count().execute())
+        if remaining == 0:
             logger.info("Delete empty table {}", name)
             self.drop_table(name)
 

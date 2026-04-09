@@ -3,7 +3,7 @@ import json
 import pandas as pd
 from loguru import logger
 
-from chronify.exceptions import TableNotStored
+from chronify.exceptions import InvalidParameter, TableNotStored
 from chronify.ibis.base import IbisBackend
 from chronify.models import TableSchema
 
@@ -27,15 +27,16 @@ class SchemaManager:
     def _create_schemas_table(self) -> None:
         import ibis
 
+        # Uniqueness of `name` is enforced in `add_schema` rather than via a
+        # unique index, since Spark SQL does not support CREATE UNIQUE INDEX.
         schema = ibis.schema({"name": "string", "schema": "string"})
         self._backend.create_table(self.SCHEMAS_TABLE, schema=schema)
-        self._backend.execute_sql(
-            f"CREATE UNIQUE INDEX idx_{self.SCHEMAS_TABLE}_name "
-            f"ON {self.SCHEMAS_TABLE} (name)"
-        )
 
     def add_schema(self, schema: TableSchema) -> None:
         """Add the schema to the store."""
+        if schema.name in self._cache:
+            msg = f"A schema with name={schema.name!r} is already registered"
+            raise InvalidParameter(msg)
         df = pd.DataFrame({"name": [schema.name], "schema": [schema.model_dump_json()]})
         self._backend.insert(self.SCHEMAS_TABLE, df)
         self._cache[schema.name] = schema
@@ -56,10 +57,7 @@ class SchemaManager:
 
     def remove_schema(self, name: str) -> None:
         """Remove the schema from the store."""
-        safe_name = name.replace("'", "''")
-        self._backend.execute_sql(
-            f"DELETE FROM {self.SCHEMAS_TABLE} WHERE name = '{safe_name}'"
-        )
+        self._backend.delete_rows(self.SCHEMAS_TABLE, {"name": name})
         self._cache.pop(name, None)
 
     def rebuild_cache(self) -> None:

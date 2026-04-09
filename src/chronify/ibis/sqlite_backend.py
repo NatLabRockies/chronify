@@ -1,6 +1,7 @@
 """SQLite backend implementation for Ibis."""
 
 from pathlib import Path
+from typing import Any, cast
 
 import ibis
 import ibis.expr.types as ir
@@ -54,7 +55,7 @@ class SQLiteBackend(IbisBackend):
         self._connection.drop_view(name, force=True)
 
     def list_tables(self) -> list[str]:
-        return self._connection.list_tables()
+        return cast(list[str], self._connection.list_tables())
 
     def table(self, name: str) -> ir.Table:
         return self._connection.table(name)
@@ -65,10 +66,11 @@ class SQLiteBackend(IbisBackend):
         table = self._connection.table(name)
         columns = table.columns
         placeholders = ", ".join(["?"] * len(columns))
-        col_list = ", ".join(columns)
-        sql = f"INSERT INTO {name} ({col_list}) VALUES ({placeholders})"
+        col_list = ", ".join(_quote_identifier(c) for c in columns)
+        quoted_name = _quote_identifier(name)
+        sql = f"INSERT INTO {quoted_name} ({col_list}) VALUES ({placeholders})"
 
-        arrow_table = pa.Table.from_pandas(data)
+        arrow_table = pa.Table.from_pandas(data.reindex(columns=columns))
         cursor = con.cursor()
         for batch in arrow_table.to_batches():
             rows = [tuple(row[col].as_py() for col in range(batch.num_columns)) for row in zip(*[batch.column(i) for i in range(batch.num_columns)])]
@@ -76,8 +78,17 @@ class SQLiteBackend(IbisBackend):
         con.commit()
         logger.trace("Inserted {} rows into {}", len(data), name)
 
+    def delete_rows(self, name: str, values: dict[str, Any]) -> None:
+        con = self._connection.con
+        quoted_name = _quote_identifier(name)
+        where = " AND ".join(f"{_quote_identifier(c)} = ?" for c in values)
+        sql = f"DELETE FROM {quoted_name} WHERE {where}"
+        con.execute(sql, list(values.values()))
+        con.commit()
+        logger.trace("Deleted rows from {} matching {}", name, values)
+
     def execute(self, expr: ir.Expr) -> pd.DataFrame:
-        return self._connection.execute(expr)
+        return cast(pd.DataFrame, self._connection.execute(expr))
 
     def sql(self, query: str) -> ir.Table:
         return self._connection.sql(query)
@@ -119,3 +130,9 @@ class SQLiteBackend(IbisBackend):
     def reconnect(self) -> None:
         db = self._database if self._database else ":memory:"
         self._connection = ibis.sqlite.connect(db)
+
+
+def _quote_identifier(identifier: str) -> str:
+    """Quote a SQL identifier for SQLite, escaping embedded double quotes."""
+    escaped = identifier.replace('"', '""')
+    return f'"{escaped}"'

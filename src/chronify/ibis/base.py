@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from enum import Enum
-from typing import Any, Generator
+from typing import Any, Generator, cast
 
 import ibis
 import ibis.expr.types as ir
@@ -82,6 +82,14 @@ class IbisBackend(ABC):
         """Insert data into an existing table."""
 
     @abstractmethod
+    def delete_rows(self, name: str, values: dict[str, Any]) -> None:
+        """Delete rows from a table where every column equals its given value.
+
+        Identifiers must be quoted and values must be parameterized to avoid
+        SQL injection and to handle values containing quote characters.
+        """
+
+    @abstractmethod
     def execute(self, expr: ir.Expr) -> pd.DataFrame:
         """Execute an ibis expression and return a DataFrame."""
 
@@ -118,7 +126,7 @@ class IbisBackend(ABC):
     def execute_sql_to_df(self, query: str) -> pd.DataFrame:
         """Execute a raw SQL query and return a DataFrame."""
         logger.trace("execute_sql_to_df: {}", query)
-        return self.connection.raw_sql(query).fetch_df()
+        return cast(pd.DataFrame, self.connection.raw_sql(query).fetch_df())
 
     def dispose(self) -> None:
         """Dispose of the backend connection."""

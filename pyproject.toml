@@ -40,7 +40,7 @@ dependencies = [
 [project.optional-dependencies]
 spark = [
     "ibis-framework[pyspark]",
-    "pyspark >= 4.0",
+    "pyspark == 4.0.0",
 ]
 
 dev = [
@@ -69,6 +69,15 @@ files = [
   "src",
 ]
 strict = true
+
+[[tool.mypy.overrides]]
+module = [
+  "ibis",
+  "ibis.*",
+  "pyarrow",
+  "pyarrow.*",
+]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 pythonpath = "src"
