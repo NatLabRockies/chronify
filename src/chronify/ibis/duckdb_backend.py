@@ -93,10 +93,12 @@ class DuckDBBackend(IbisBackend):
         partition_by: list[str] | None = None,
     ) -> None:
         if partition_by:
-            partition_clause = ", ".join(partition_by)
+            partition_clause = ", ".join(_quote_identifier(c) for c in partition_by)
+            escaped_path = path.replace("'", "''")
             sql = self._connection.compile(expr)
             self._connection.raw_sql(
-                f"COPY ({sql}) TO '{path}' (FORMAT PARQUET, PARTITION_BY ({partition_clause}))"
+                f"COPY ({sql}) TO '{escaped_path}' "
+                f"(FORMAT PARQUET, PARTITION_BY ({partition_clause}))"
             )
         else:
             expr.to_parquet(path)
@@ -107,8 +109,10 @@ class DuckDBBackend(IbisBackend):
             read_path = str(parquet_path / "**" / "*.parquet").replace("\\", "/")
         else:
             read_path = str(parquet_path).replace("\\", "/")
+        quoted_name = _quote_identifier(name)
+        escaped_path = read_path.replace("'", "''")
         self._connection.raw_sql(
-            f"CREATE VIEW {name} AS SELECT * FROM read_parquet('{read_path}')"
+            f"CREATE VIEW {quoted_name} AS SELECT * FROM read_parquet('{escaped_path}')"
         )
         return self.table(name), ObjectType.VIEW
 

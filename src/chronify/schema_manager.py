@@ -66,7 +66,7 @@ class SchemaManager:
         self._rebuild_cache()
 
     def _rebuild_cache(self) -> None:
-        df = self._backend.execute_sql_to_df(f"SELECT * FROM {self.SCHEMAS_TABLE}")
+        df = self._backend.execute(self._backend.table(self.SCHEMAS_TABLE))
         for _, row in df.iterrows():
             name = row["name"]
             schema = TableSchema(**json.loads(row["schema"]))

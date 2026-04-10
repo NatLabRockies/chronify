@@ -77,13 +77,18 @@ class SparkBackend(IbisBackend):
 
     def insert(self, name: str, data: pd.DataFrame) -> None:
         # Spark doesn't support INSERT directly -- create a temp view and insert via SQL
+        target_columns = list(self.table(name).columns)
+        data = data.reindex(columns=target_columns)
         data = self._prepare_data_for_spark(data)
         spark_df = self._session.createDataFrame(data)
         tmp_view = f"__insert_tmp_{uuid.uuid4().hex}"
         spark_df.createOrReplaceTempView(tmp_view)
         quoted_name = _quote_identifier(name)
+        col_list = ", ".join(_quote_identifier(c) for c in target_columns)
         try:
-            self._session.sql(f"INSERT INTO {quoted_name} SELECT * FROM {tmp_view}")
+            self._session.sql(
+                f"INSERT INTO {quoted_name} ({col_list}) SELECT {col_list} FROM {tmp_view}"
+            )
         finally:
             self._session.catalog.dropTempView(tmp_view)
         logger.trace("Inserted {} rows into {}", len(data), name)

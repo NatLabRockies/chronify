@@ -1,15 +1,28 @@
 """SQLite backend implementation for Ibis."""
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
 import ibis
 import ibis.expr.types as ir
 import pandas as pd
-import pyarrow as pa
 from loguru import logger
 
 from chronify.ibis.base import IbisBackend, ObjectType
+
+
+def _adapt_value(v: Any) -> Any:
+    """Convert a value for SQLite parameterized insertion.
+
+    Converts datetime/Timestamp objects to ISO-format strings to avoid the
+    Python 3.12+ DeprecationWarning about the default datetime adapter.
+    """
+    if isinstance(v, datetime):
+        return v.isoformat()
+    if hasattr(v, "isoformat"):
+        return v.isoformat()
+    return v
 
 
 class SQLiteBackend(IbisBackend):
@@ -70,14 +83,10 @@ class SQLiteBackend(IbisBackend):
         quoted_name = _quote_identifier(name)
         sql = f"INSERT INTO {quoted_name} ({col_list}) VALUES ({placeholders})"
 
-        arrow_table = pa.Table.from_pandas(data.reindex(columns=columns))
+        ordered = data.reindex(columns=columns)
+        rows = [tuple(_adapt_value(v) for v in row) for row in ordered.itertuples(index=False)]
         cursor = con.cursor()
-        for batch in arrow_table.to_batches():
-            rows = [
-                tuple(row[col].as_py() for col in range(batch.num_columns))
-                for row in zip(*[batch.column(i) for i in range(batch.num_columns)])
-            ]
-            cursor.executemany(sql, rows)
+        cursor.executemany(sql, rows)
         con.commit()
         logger.trace("Inserted {} rows into {}", len(data), name)
 

@@ -1,17 +1,13 @@
 import re
 from typing import Any, Optional
 
-import duckdb
 import ibis.expr.datatypes as dt
-import pandas as pd
-from duckdb.typing import DuckDBPyType
 from pydantic import Field, field_validator, model_validator
 from typing_extensions import Annotated
 
 from chronify.base_models import ChronifyBaseModel
 from chronify.exceptions import InvalidValue
 from chronify.ibis.types import (
-    get_ibis_type_from_duckdb,
     get_ibis_type_from_string,
     get_duckdb_type_from_ibis,
 )
@@ -147,20 +143,9 @@ class MappingTableSchema(ChronifyBaseModel):
         return time_columns
 
 
-def get_ibis_type_from_duckdb_pytype(duckdb_type: DuckDBPyType) -> dt.DataType:
-    """Return the ibis type for a duckdb type."""
-    return get_ibis_type_from_duckdb(str(duckdb_type))
-
-
 def get_duckdb_type_from_ibis_type(ibis_type: dt.DataType) -> str:
     """Return the duckdb type string for an ibis type."""
     return get_duckdb_type_from_ibis(ibis_type)
-
-
-def get_duckdb_types_from_pandas(df: pd.DataFrame) -> list[DuckDBPyType]:
-    """Return a list of DuckDB types from a pandas dataframe."""
-    short_df = df.head(1)  # noqa: F841
-    return duckdb.sql("select * from short_df").dtypes
 
 
 class ColumnDType(ChronifyBaseModel):

@@ -183,11 +183,8 @@ def _apply_mapping(  # noqa: C901
             return joined[col + "_right"]
         return joined[col]
 
-    # Build value expression
-    val_expr: Any = _left_col(val_col) if val_col not in right_columns else _left_col(val_col)
-    if val_col in right_columns and val_col in left_columns:
-        # val_col exists in both; we want the left (source) value
-        val_expr = _left_col(val_col)
+    # Build value expression (always from the left/source table)
+    val_expr: Any = _left_col(val_col)
     if "factor" in right_columns:
         val_expr = val_expr * _right_col("factor")
 
@@ -205,11 +202,11 @@ def _apply_mapping(  # noqa: C901
         group_exprs = select_exprs.copy()
         match resampling_operation:
             case AggregationType.SUM:
-                select_exprs.append(val_expr.sum().name(val_col))
+                agg_expr = val_expr.sum().name(val_col)
             case _:
                 msg = f"Unsupported {resampling_operation=}"
                 raise InvalidOperation(msg)
-        result = joined.group_by(group_exprs).aggregate(val_expr.sum().name(val_col))
+        result = joined.group_by(group_exprs).aggregate(agg_expr)
 
     if output_file is not None:
         output_file = to_path(output_file)
