@@ -17,7 +17,10 @@ def _adapt_value(v: Any) -> Any:
 
     Converts datetime/Timestamp objects to ISO-format strings to avoid the
     Python 3.12+ DeprecationWarning about the default datetime adapter.
+    Returns None for pd.NaT and other missing-value sentinels.
     """
+    if v is pd.NaT or v is None:
+        return None
     if isinstance(v, datetime):
         return v.isoformat()
     if hasattr(v, "isoformat"):
