@@ -574,14 +574,32 @@ class Store:
         file_path: Path | str,
         overwrite: bool = False,
         partition_columns: Optional[list[str]] = None,
+        name: Optional[str] = None,
     ) -> None:
-        """Write the result of a query to a Parquet file."""
+        """Write the result of a query to a Parquet file.
+
+        Parameters
+        ----------
+        stmt
+            SQL query or ibis Table expression.
+        file_path
+            Output Parquet file path.
+        overwrite
+            Whether to overwrite an existing file.
+        partition_columns
+            Optional columns to partition by.
+        name
+            Optional table/view name used to look up the time config for
+            backend-specific timestamp normalization (e.g. Spark).
+        """
+        config = self._schema_mgr.get_schema(name).time_config if name else None
         write_parquet(
             self._backend,
             stmt,
             to_path(file_path),
             overwrite=overwrite,
             partition_columns=partition_columns,
+            config=config,
         )
 
     def write_table_to_parquet(

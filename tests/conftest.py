@@ -1,4 +1,5 @@
-from typing import Generator
+import os
+from typing import Any, Generator
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 import numpy as np
@@ -13,12 +14,32 @@ from chronify.time_configs import RepresentativePeriodTimeNTZ, RepresentativePer
 
 
 BACKEND_NAMES = ["duckdb", "sqlite"]
+_SPARK_AVAILABLE = bool(os.environ.get("JAVA_HOME"))
+ALL_BACKEND_NAMES = [*BACKEND_NAMES, "spark"] if _SPARK_AVAILABLE else BACKEND_NAMES
 
 
 @pytest.fixture
 def create_duckdb_backend() -> IbisBackend:
     """Return a DuckDB backend."""
     return make_backend("duckdb")
+
+
+def _make_backend(name: str, tmp_path: Path | None = None, **kwargs: Any) -> IbisBackend:
+    """Create a backend, handling Spark's SparkSession requirement."""
+    if name == "spark":
+        from chronify.ibis.spark_backend import SparkBackend
+        from pyspark.sql import SparkSession
+
+        warehouse_dir = (tmp_path or Path("/tmp")) / "spark-warehouse"  # noqa: S108
+        session = (
+            SparkSession.builder.master("local")
+            .config("spark.sql.session.timeZone", "UTC")
+            .config("spark.sql.parquet.outputTimestampType", "TIMESTAMP_MICROS")
+            .config("spark.sql.warehouse.dir", str(warehouse_dir))
+            .getOrCreate()
+        )
+        return SparkBackend(session=session, **kwargs)
+    return make_backend(name, **kwargs)
 
 
 @pytest.fixture(params=BACKEND_NAMES)
@@ -29,10 +50,27 @@ def iter_backends(request) -> Generator[IbisBackend, None, None]:
     backend.dispose()
 
 
+@pytest.fixture(params=ALL_BACKEND_NAMES)
+def iter_all_backends(request, tmp_path) -> Generator[IbisBackend, None, None]:
+    """Return an iterable of in-memory backends including Spark when available."""
+    backend = _make_backend(request.param, tmp_path=tmp_path)
+    yield backend
+    backend.dispose()
+
+
 @pytest.fixture(params=BACKEND_NAMES)
 def iter_stores_by_engine(request) -> Generator[Store, None, None]:
     """Return an iterable of stores with different backends to test."""
     backend = make_backend(request.param)
+    store = Store(backend=backend)
+    yield store
+    store.dispose()
+
+
+@pytest.fixture(params=ALL_BACKEND_NAMES)
+def iter_all_stores(request, tmp_path) -> Generator[Store, None, None]:
+    """Return an iterable of stores including Spark when available."""
+    backend = _make_backend(request.param, tmp_path=tmp_path)
     store = Store(backend=backend)
     yield store
     store.dispose()

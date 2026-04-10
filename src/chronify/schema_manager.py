@@ -30,7 +30,15 @@ class SchemaManager:
         # Uniqueness of `name` is enforced in `add_schema` rather than via a
         # unique index, since Spark SQL does not support CREATE UNIQUE INDEX.
         schema = ibis.schema({"name": "string", "schema": "string"})
-        self._backend.create_table(self.SCHEMAS_TABLE, schema=schema)
+        try:
+            self._backend.create_table(self.SCHEMAS_TABLE, schema=schema)
+        except Exception:
+            # On Spark, a stale warehouse directory can cause
+            # LOCATION_ALREADY_EXISTS even though list_tables() didn't find
+            # the table. Drop the stale remnant and retry.
+            logger.debug("Retrying schemas table creation after dropping stale remnant.")
+            self._backend.drop_table(self.SCHEMAS_TABLE)
+            self._backend.create_table(self.SCHEMAS_TABLE, schema=schema)
 
     def add_schema(self, schema: TableSchema) -> None:
         """Add the schema to the store."""
