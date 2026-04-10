@@ -7,7 +7,9 @@ import ibis
 import ibis.expr.types as ir
 import pandas as pd
 from loguru import logger
+from pandas import DatetimeTZDtype
 
+from chronify.exceptions import InvalidParameter
 from chronify.ibis.base import IbisBackend, ObjectType
 
 
@@ -24,6 +26,7 @@ class SparkBackend(IbisBackend):
             msg = "pyspark is required for SparkBackend. Install with: pip install chronify[spark]"
             raise ImportError(msg) from e
 
+        self._owns_session = session is None
         if session is None:
             session = (
                 SparkSession.builder.master("local")
@@ -31,6 +34,7 @@ class SparkBackend(IbisBackend):
                 .config("spark.sql.parquet.outputTimestampType", "TIMESTAMP_MICROS")
                 .getOrCreate()
             )
+        self._validate_session(session)
         self._session = session
         self._connection = ibis.pyspark.connect(session)
 
@@ -88,9 +92,7 @@ class SparkBackend(IbisBackend):
         # Spark 3.4+ supports parameterized SQL via the ``args`` keyword.
         quoted_name = _quote_identifier(name)
         param_names = [f"p{i}" for i in range(len(values))]
-        where = " AND ".join(
-            f"{_quote_identifier(c)} = :{p}" for c, p in zip(values, param_names)
-        )
+        where = " AND ".join(f"{_quote_identifier(c)} = :{p}" for c, p in zip(values, param_names))
         sql = f"DELETE FROM {quoted_name} WHERE {where}"
         args = dict(zip(param_names, values.values()))
         self._session.sql(sql, args=args)
@@ -129,18 +131,35 @@ class SparkBackend(IbisBackend):
         return cast(pd.DataFrame, self._session.sql(query).toPandas())
 
     def dispose(self) -> None:
-        pass  # Don't stop the Spark session -- it may be shared
+        if self._owns_session:
+            self._session.stop()
 
     def reconnect(self) -> None:
         pass  # Spark sessions are long-lived
 
     @staticmethod
     def _prepare_data_for_spark(df: pd.DataFrame) -> pd.DataFrame:
-        """Convert datetime columns to strings to avoid Spark DST issues."""
+        """Normalize tz-aware pandas timestamps for Spark ingestion.
+
+        Spark timestamps are timezone-naive and interpreted in the session time
+        zone. We require UTC sessions, so convert tz-aware columns to tz-naive
+        UTC timestamps before handing them to Spark.
+        """
         df = df.copy()
-        for col in df.select_dtypes(include=["datetime64[ns, UTC]", "datetimetz"]).columns:
-            df[col] = df[col].dt.strftime("%Y-%m-%d %H:%M:%S%z")
+        for col in df.columns:
+            if isinstance(df[col].dtype, DatetimeTZDtype):
+                df[col] = df[col].dt.tz_convert("UTC").dt.tz_localize(None)
         return df
+
+    @staticmethod
+    def _validate_session(session: Any) -> None:
+        time_zone = session.conf.get("spark.sql.session.timeZone", None) or "UTC"
+        if time_zone != "UTC":
+            msg = (
+                "SparkBackend requires spark.sql.session.timeZone=UTC to preserve "
+                f"timestamp semantics, got {time_zone!r}."
+            )
+            raise InvalidParameter(msg)
 
 
 def _quote_identifier(identifier: str) -> str:

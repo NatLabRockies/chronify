@@ -83,6 +83,7 @@ def write_parquet(
     output_file: Path,
     overwrite: bool = False,
     partition_columns: list[str] | None = None,
+    config: TimeBaseModel | None = None,
 ) -> None:
     """Write query results to a Parquet file."""
     check_overwrite(output_file, overwrite)
@@ -91,6 +92,15 @@ def write_parquet(
         expr = backend.sql(query)
     else:
         expr = query
+
+    if backend.name == "spark" and isinstance(config, _DATETIME_RANGES):
+        df = backend.execute(expr)
+        _convert_spark_output_for_datetime(df, config)
+        if partition_columns:
+            df.to_parquet(output_file, partition_cols=partition_columns)
+        else:
+            df.to_parquet(output_file)
+        return
 
     backend.write_parquet(expr, str(output_file), partition_by=partition_columns)
 

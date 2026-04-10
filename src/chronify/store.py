@@ -191,9 +191,7 @@ class Store:
                 self._backend.drop_view(schema.name)
             raise
 
-    def _create_view_from_parquet(
-        self, path: Path | str, schema: TableSchema
-    ) -> "ObjectType":
+    def _create_view_from_parquet(self, path: Path | str, schema: TableSchema) -> "ObjectType":
         """Create a view in the database from a Parquet file."""
         obj_type = create_view_from_parquet(self._backend, to_path(path), schema.name)
         self._schema_mgr.add_schema(schema)
@@ -605,6 +603,7 @@ class Store:
             to_path(file_path),
             overwrite=overwrite,
             partition_columns=partition_columns,
+            config=self._schema_mgr.get_schema(name).time_config,
         )
         logger.info("Wrote table or view to {}", file_path)
 

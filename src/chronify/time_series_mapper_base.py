@@ -107,9 +107,7 @@ def apply_mapping(
         if check_mapped_timestamps:
             if output_file is not None:
                 output_file = to_path(output_file)
-                created_tmp_obj = create_view_from_parquet(
-                    backend, output_file, to_schema.name
-                )
+                created_tmp_obj = create_view_from_parquet(backend, output_file, to_schema.name)
             try:
                 check_timestamps(
                     backend,
@@ -215,7 +213,7 @@ def _apply_mapping(  # noqa: C901
 
     if output_file is not None:
         output_file = to_path(output_file)
-        write_parquet(backend, result, output_file, overwrite=True)
+        write_parquet(backend, result, output_file, overwrite=True, config=to_schema.time_config)
         return
 
     backend.create_table(to_schema.name, result)

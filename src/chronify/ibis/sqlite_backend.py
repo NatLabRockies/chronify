@@ -73,7 +73,10 @@ class SQLiteBackend(IbisBackend):
         arrow_table = pa.Table.from_pandas(data.reindex(columns=columns))
         cursor = con.cursor()
         for batch in arrow_table.to_batches():
-            rows = [tuple(row[col].as_py() for col in range(batch.num_columns)) for row in zip(*[batch.column(i) for i in range(batch.num_columns)])]
+            rows = [
+                tuple(row[col].as_py() for col in range(batch.num_columns))
+                for row in zip(*[batch.column(i) for i in range(batch.num_columns)])
+            ]
             cursor.executemany(sql, rows)
         con.commit()
         logger.trace("Inserted {} rows into {}", len(data), name)

@@ -10,7 +10,11 @@ from typing_extensions import Annotated
 
 from chronify.base_models import ChronifyBaseModel
 from chronify.exceptions import InvalidValue
-from chronify.ibis.types import get_ibis_type_from_duckdb, get_ibis_type_from_string, get_duckdb_type_from_ibis
+from chronify.ibis.types import (
+    get_ibis_type_from_duckdb,
+    get_ibis_type_from_string,
+    get_duckdb_type_from_ibis,
+)
 from chronify.time_configs import TimeConfig
 
 
