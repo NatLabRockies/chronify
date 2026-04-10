@@ -136,8 +136,8 @@ class SparkBackend(IbisBackend):
         return cast(pd.DataFrame, self._session.sql(query).toPandas())
 
     def dispose(self) -> None:
-        self._connection.disconnect()
         if self._owns_session:
+            self._connection.disconnect()
             self._session.stop()
 
     def reconnect(self) -> None:
