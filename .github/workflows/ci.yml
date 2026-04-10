@@ -30,14 +30,9 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         python -m pip install ".[dev,spark]"
-        wget https://dlcdn.apache.org/spark/spark-4.0.1/spark-4.0.1-bin-hadoop3.tgz
-        tar -xzf spark-4.0.1-bin-hadoop3.tgz
-        export SPARK_HOME=$(pwd)/spark-4.0.1-bin-hadoop3
-        export PATH=$SPARK_HOME/sbin:$PATH
-        start-thriftserver.sh
     - name: Run pytest with coverage
       run: |
-        CHRONIFY_HIVE_URL=hive://localhost:10000/default pytest -v --cov --cov-report=xml
+        pytest -v --cov --cov-report=xml
     - name: codecov
       uses: codecov/codecov-action@v4.2.0
       if: ${{ matrix.os == env.DEFAULT_OS && matrix.python-version == env.DEFAULT_PYTHON  }}
