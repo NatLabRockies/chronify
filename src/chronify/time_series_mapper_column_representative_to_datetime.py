@@ -1,5 +1,6 @@
 from typing import Optional, Generator
 import re
+import uuid
 from pathlib import Path
 import pandas as pd
 from datetime import datetime
@@ -125,7 +126,9 @@ class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
 
     def _intermediate_mapping_ymdp_to_ymdh(self) -> TableSchema:
         """Convert ymdp to ymdh for intermediate mapping."""
-        mapping_table_name = "intermediate_ymdp_to_ymdh"
+        uid = uuid.uuid4().hex[:8]
+        mapping_table_name = f"_int_ymdp_to_ymdh_{uid}"
+        intermediate_ymdh_table_name = f"_int_ymdh_{uid}"
         period_col = self._from_time_config.hour_columns[0]
 
         # Get distinct periods
@@ -141,28 +144,28 @@ class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
             if_exists="fail",
         )
 
-        # Build the join query using ibis
-        ymdp_table = self._backend.table(self._from_schema.name)
-        mapping_table = self._backend.table(mapping_table_name)
+        try:
+            # Build the join query using ibis
+            ymdp_table = self._backend.table(self._from_schema.name)
+            mapping_table = self._backend.table(mapping_table_name)
 
-        # Select all columns from ymdp except the period column, plus the hour column from mapping
-        ymdp_cols = [c for c in ymdp_table.columns if c != period_col]
-        select_exprs = [ymdp_table[c] for c in ymdp_cols] + [mapping_table["hour"]]
+            # Select all columns from ymdp except the period column, plus hour from mapping
+            ymdp_cols = [c for c in ymdp_table.columns if c != period_col]
+            select_exprs = [ymdp_table[c] for c in ymdp_cols] + [mapping_table["hour"]]
 
-        joined = ymdp_table.join(
-            mapping_table, ymdp_table[period_col] == mapping_table["from_period"]
-        )
-        result = joined.select(select_exprs)
+            joined = ymdp_table.join(
+                mapping_table, ymdp_table[period_col] == mapping_table["from_period"]
+            )
+            result = joined.select(select_exprs)
+            self._backend.create_table(intermediate_ymdh_table_name, result)
+        finally:
+            # Always clean up the mapping table
+            if self._backend.has_table(mapping_table_name):
+                self._backend.drop_table(mapping_table_name)
 
-        intermediate_ymdh_table_name = "intermediate_Ymdh"
-        self._backend.create_table(intermediate_ymdh_table_name, result)
-
-        # Clean up mapping table
-        self._backend.drop_table(mapping_table_name)
-
-        assert isinstance(
-            self._from_time_config, YearMonthDayPeriodTimeNTZ
-        ), "Intermediate mapping only valid for YearMonthDayPeriodNTZ time config"
+        if not isinstance(self._from_time_config, YearMonthDayPeriodTimeNTZ):
+            msg = "Intermediate mapping only valid for YearMonthDayPeriodNTZ time config"
+            raise InvalidParameter(msg)
         return self._create_intermediate_ymdh_schema(
             intermediate_ymdh_table_name, self._from_schema, self._from_time_config
         )

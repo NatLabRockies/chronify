@@ -34,6 +34,7 @@ def spark_store(tmp_path: Path) -> Store:
     store = Store(backend=SparkBackend(session=session))
     yield store
     store.dispose()
+    session.stop()
 
 
 def test_spark_round_trip_timestamp_tz_preserves_fractional_seconds(spark_store: Store) -> None:

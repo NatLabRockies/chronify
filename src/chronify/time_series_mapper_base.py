@@ -158,7 +158,9 @@ def _apply_mapping(  # noqa: C901
     # Build join predicates
     from_keys = [x for x in right_columns if x.startswith("from_")]
     keys = [x.removeprefix("from_") for x in from_keys]
-    assert set(keys).issubset(set(left_columns)), f"Keys {keys} not in table={from_schema.name}"
+    if not set(keys).issubset(set(left_columns)):
+        msg = f"Mapping keys {keys} not found in source table {from_schema.name}"
+        raise ConflictingInputsError(msg)
     predicates = []
     for k in keys:
         left_col = left[k]

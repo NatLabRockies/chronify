@@ -121,8 +121,8 @@ class TimeSeriesChecker:
 
         all_are_null = " AND ".join((f"{x} IS NULL" for x in time_columns))
         any_are_null = " OR ".join((f"{x} IS NULL" for x in time_columns))
-        query_all = f"SELECT COUNT(*) FROM {self._schema.name} WHERE {all_are_null}"
-        query_any = f"SELECT COUNT(*) FROM {self._schema.name} WHERE {any_are_null}"
+        query_all = f"SELECT COUNT(*) FROM {self._table_name} WHERE {all_are_null}"
+        query_any = f"SELECT COUNT(*) FROM {self._table_name} WHERE {any_are_null}"
         df_all = self._backend.execute_sql_to_df(query_all)
         df_any = self._backend.execute_sql_to_df(query_any)
         count_all = df_all.iloc[0, 0]
@@ -154,7 +154,7 @@ class TimeSeriesChecker:
             query = f"""
                 WITH distinct_time_values_by_array AS (
                     SELECT DISTINCT {time_cols}
-                    FROM {self._schema.name}
+                    FROM {self._table_name}
                     WHERE {where_clause}
                 ),
                 t1 AS (
@@ -163,7 +163,7 @@ class TimeSeriesChecker:
                 ),
                 t2 AS (
                     SELECT COUNT(*) AS count_by_ta
-                    FROM {self._schema.name}
+                    FROM {self._table_name}
                     WHERE {where_clause}
                 )
                 SELECT
@@ -176,7 +176,7 @@ class TimeSeriesChecker:
             query = f"""
                 WITH distinct_time_values_by_array AS (
                     SELECT DISTINCT {id_cols}, {time_cols}
-                    FROM {self._schema.name}
+                    FROM {self._table_name}
                     WHERE {where_clause}
                 ),
                 t1 AS (
@@ -186,7 +186,7 @@ class TimeSeriesChecker:
                 ),
                 t2 AS (
                     SELECT {id_cols}, COUNT(*) AS count_by_ta
-                    FROM {self._schema.name}
+                    FROM {self._table_name}
                     WHERE {where_clause}
                     GROUP BY {id_cols}
                 )

@@ -27,12 +27,12 @@ def create_duckdb_backend() -> IbisBackend:
 def _make_backend(name: str, tmp_path: Path | None = None, **kwargs: Any) -> IbisBackend:
     """Create a backend, handling Spark's SparkSession requirement."""
     if name == "spark":
+        pyspark = pytest.importorskip("pyspark.sql")
         from chronify.ibis.spark_backend import SparkBackend
-        from pyspark.sql import SparkSession
 
         warehouse_dir = (tmp_path or Path("/tmp")) / "spark-warehouse"  # noqa: S108
         session = (
-            SparkSession.builder.master("local")
+            pyspark.SparkSession.builder.master("local")
             .config("spark.sql.session.timeZone", "UTC")
             .config("spark.sql.parquet.outputTimestampType", "TIMESTAMP_MICROS")
             .config("spark.sql.warehouse.dir", str(warehouse_dir))
