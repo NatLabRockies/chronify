@@ -172,27 +172,27 @@ def run_conversion_with_error(
             tzc2.convert_time_zone(check_mapped_timestamps=True)
 
 
-def test_src_table_no_time_zone(iter_backends: IbisBackend) -> None:
+def test_src_table_no_time_zone(iter_all_backends: IbisBackend) -> None:
     from_schema = get_datetime_schema(2018, None, TimeIntervalType.PERIOD_BEGINNING, "base_table")
     df = generate_datetime_dataframe(from_schema)
     error = (InvalidParameter, "Source schema time config start time must be timezone-aware")
-    run_conversion_with_error(iter_backends, df, from_schema, False, error)
+    run_conversion_with_error(iter_all_backends, df, from_schema, False, error)
 
 
 @pytest.mark.parametrize(
     "to_time_zone", [None, ZoneInfo("US/Central"), ZoneInfo("America/Los_Angeles")]
 )
-def test_time_conversion(iter_backends: IbisBackend, to_time_zone: tzinfo | None) -> None:
+def test_time_conversion(iter_all_backends: IbisBackend, to_time_zone: tzinfo | None) -> None:
     from_schema = get_datetime_schema(
         2018, ZoneInfo("US/Mountain"), TimeIntervalType.PERIOD_BEGINNING, "base_table"
     )
     df = generate_datetime_dataframe(from_schema)
-    run_conversion(iter_backends, df, from_schema, to_time_zone)
+    run_conversion(iter_all_backends, df, from_schema, to_time_zone)
 
 
 @pytest.mark.parametrize("wrap_time_allowed", [False, True])
 def test_time_conversion_to_column_time_zones(
-    iter_backends: IbisBackend, wrap_time_allowed: bool
+    iter_all_backends: IbisBackend, wrap_time_allowed: bool
 ) -> None:
     from_schema = get_datetime_schema(
         2018,
@@ -202,4 +202,4 @@ def test_time_conversion_to_column_time_zones(
         has_tz_col=True,
     )
     df = generate_dataframe_with_tz_col(from_schema)
-    run_conversion_to_column_time_zones(iter_backends, df, from_schema, wrap_time_allowed)
+    run_conversion_to_column_time_zones(iter_all_backends, df, from_schema, wrap_time_allowed)

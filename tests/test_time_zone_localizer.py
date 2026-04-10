@@ -225,15 +225,15 @@ def run_localization_by_column_with_error(
 
 
 @pytest.mark.parametrize("to_time_zone", [None, ZoneInfo("Etc/GMT+5")])
-def test_time_localization(iter_backends: IbisBackend, to_time_zone: tzinfo | None) -> None:
+def test_time_localization(iter_all_backends: IbisBackend, to_time_zone: tzinfo | None) -> None:
     from_schema = get_datetime_schema(2018, None, TimeIntervalType.PERIOD_BEGINNING, "base_table")
     df = generate_datetime_dataframe(from_schema)
-    run_localization(iter_backends, df, from_schema, to_time_zone)
+    run_localization(iter_all_backends, df, from_schema, to_time_zone)
 
 
 @pytest.mark.parametrize("from_time_tz", [None, ZoneInfo("US/Mountain"), ZoneInfo("MST")])
 def test_time_localization_by_column(
-    iter_backends: IbisBackend, from_time_tz: tzinfo | None
+    iter_all_backends: IbisBackend, from_time_tz: tzinfo | None
 ) -> None:
     from_schema = get_datetime_with_tz_col_schema(
         2018,
@@ -243,33 +243,35 @@ def test_time_localization_by_column(
         standard_tz=True,
     )
     df = generate_dataframe_with_tz_col(from_schema)
-    run_localization_to_column_time_zones(iter_backends, df, from_schema)
+    run_localization_to_column_time_zones(iter_all_backends, df, from_schema)
 
 
 # Error tests for TimeZoneLocalizer
-def test_time_localizer_to_dst_time_error(iter_backends: IbisBackend) -> None:
+def test_time_localizer_to_dst_time_error(iter_all_backends: IbisBackend) -> None:
     """Test that TimeZoneLocalizer raises error when to_time_zone is a non standard time zone"""
     from_schema = get_datetime_schema(2018, None, TimeIntervalType.PERIOD_BEGINNING, "base_table")
     df = generate_datetime_dataframe(from_schema)
     to_time_zone = ZoneInfo("US/Mountain")  # has DST
-    ingest_data(iter_backends, df, from_schema)
+    ingest_data(iter_all_backends, df, from_schema)
     with pytest.raises(
         InvalidParameter, match="TimeZoneLocalizer only supports standard time zones"
     ):
-        localize_time_zone(iter_backends, from_schema, to_time_zone, check_mapped_timestamps=True)
+        localize_time_zone(
+            iter_all_backends, from_schema, to_time_zone, check_mapped_timestamps=True
+        )
 
 
-def test_time_localizer_with_tz_aware_config_error(iter_backends: IbisBackend) -> None:
+def test_time_localizer_with_tz_aware_config_error(iter_all_backends: IbisBackend) -> None:
     """Test that TimeZoneLocalizer raises error when start time is tz-aware"""
     from_schema = get_datetime_schema(
         2018, ZoneInfo("US/Mountain"), TimeIntervalType.PERIOD_BEGINNING, "base_table"
     )
     df = generate_datetime_dataframe(from_schema)
     error = (InvalidParameter, "Source schema time config start time must be tz-naive")
-    run_localization_with_error(iter_backends, df, from_schema, error)
+    run_localization_with_error(iter_all_backends, df, from_schema, error)
 
 
-def test_time_localizer_with_wrong_dtype_error(iter_backends: IbisBackend) -> None:
+def test_time_localizer_with_wrong_dtype_error(iter_all_backends: IbisBackend) -> None:
     """Test that TimeZoneLocalizer raises error when dtype is not TIMESTAMP_NTZ"""
     from_schema = get_datetime_schema(2018, None, TimeIntervalType.PERIOD_BEGINNING, "base_table")
     # Manually change dtype to TIMESTAMP_TZ to trigger error
@@ -278,21 +280,23 @@ def test_time_localizer_with_wrong_dtype_error(iter_backends: IbisBackend) -> No
     )
     df = generate_datetime_dataframe(from_schema)
     error = (InvalidParameter, "Source schema time config dtype must be TIMESTAMP_NTZ")
-    run_localization_with_error(iter_backends, df, from_schema, error)
+    run_localization_with_error(iter_all_backends, df, from_schema, error)
 
 
-def test_time_localizer_with_datetime_range_with_tz_col_error(iter_backends: IbisBackend) -> None:
+def test_time_localizer_with_datetime_range_with_tz_col_error(
+    iter_all_backends: IbisBackend,
+) -> None:
     """Test that TimeZoneLocalizer raises error when time config is DatetimeRangeWithTZColumn"""
     from_schema = get_datetime_with_tz_col_schema(
         2018, None, TimeIntervalType.PERIOD_BEGINNING, "base_table", standard_tz=True
     )
     df = generate_dataframe_with_tz_col(from_schema)
     error = (InvalidParameter, "try using TimeZoneLocalizerByColumn")
-    run_localization_with_error(iter_backends, df, from_schema, error)
+    run_localization_with_error(iter_all_backends, df, from_schema, error)
 
 
 # Error tests for TimeZoneLocalizerByColumn
-def test_time_localizer_by_column_to_dst_time_error(iter_backends: IbisBackend) -> None:
+def test_time_localizer_by_column_to_dst_time_error(iter_all_backends: IbisBackend) -> None:
     """Test that TimeZoneLocalizerByColumn raises error when to_time_zone is a non standard time zone"""
     from_schema = get_datetime_with_tz_col_schema(
         2018,
@@ -302,22 +306,22 @@ def test_time_localizer_by_column_to_dst_time_error(iter_backends: IbisBackend) 
         standard_tz=False,
     )
     df = generate_dataframe_with_tz_col(from_schema)
-    ingest_data(iter_backends, df, from_schema)
+    ingest_data(iter_all_backends, df, from_schema)
     with pytest.raises(
         InvalidParameter, match="TimeZoneLocalizerByColumn only supports standard time zones"
     ):
-        localize_time_zone_by_column(iter_backends, from_schema, check_mapped_timestamps=True)
+        localize_time_zone_by_column(iter_all_backends, from_schema, check_mapped_timestamps=True)
 
 
-def test_time_localizer_by_column_missing_tz_column_error(iter_backends: IbisBackend) -> None:
+def test_time_localizer_by_column_missing_tz_column_error(iter_all_backends: IbisBackend) -> None:
     """Test that TimeZoneLocalizerByColumn raises error when time_zone_column is missing for DatetimeRange"""
     from_schema = get_datetime_schema(2018, None, TimeIntervalType.PERIOD_BEGINNING, "base_table")
     df = generate_datetime_dataframe(from_schema)
     error = (MissingValue, "time_zone_column must be provided")
-    run_localization_by_column_with_error(iter_backends, df, from_schema, error)
+    run_localization_by_column_with_error(iter_all_backends, df, from_schema, error)
 
 
-def test_time_localizer_by_column_wrong_dtype_error(iter_backends: IbisBackend) -> None:
+def test_time_localizer_by_column_wrong_dtype_error(iter_all_backends: IbisBackend) -> None:
     """Test that TimeZoneLocalizerByColumn raises error when dtype is not TIMESTAMP_NTZ"""
     from_schema = get_datetime_with_tz_col_schema(
         2018, None, TimeIntervalType.PERIOD_BEGINNING, "base_table", standard_tz=True
@@ -328,20 +332,22 @@ def test_time_localizer_by_column_wrong_dtype_error(iter_backends: IbisBackend) 
     )
     df = generate_dataframe_with_tz_col(from_schema)
     error = (InvalidParameter, "Source schema time config dtype must be TIMESTAMP_NTZ")
-    run_localization_by_column_with_error(iter_backends, df, from_schema, error)
+    run_localization_by_column_with_error(iter_all_backends, df, from_schema, error)
 
 
-def test_time_localizer_by_column_non_standard_tz_error(iter_backends: IbisBackend) -> None:
+def test_time_localizer_by_column_non_standard_tz_error(iter_all_backends: IbisBackend) -> None:
     """Test that TimeZoneLocalizerByColumn raises error when time zones are not standard"""
     from_schema = get_datetime_with_tz_col_schema(
         2018, None, TimeIntervalType.PERIOD_BEGINNING, "base_table", standard_tz=False
     )
     df = generate_dataframe_with_tz_col(from_schema)
     error = (InvalidParameter, "is not a standard time zone")
-    run_localization_by_column_with_error(iter_backends, df, from_schema, error)
+    run_localization_by_column_with_error(iter_all_backends, df, from_schema, error)
 
 
-def test_localize_time_zone_by_column_missing_tz_column_error(iter_backends: IbisBackend) -> None:
+def test_localize_time_zone_by_column_missing_tz_column_error(
+    iter_all_backends: IbisBackend,
+) -> None:
     """Test that localize_time_zone_by_column raises error when time_zone_column is None for DatetimeRange"""
     from_schema = get_datetime_schema(2018, None, TimeIntervalType.PERIOD_BEGINNING, "base_table")
     df = generate_datetime_dataframe(from_schema)
@@ -350,5 +356,5 @@ def test_localize_time_zone_by_column_missing_tz_column_error(iter_backends: Ibi
         "time_zone_column must be provided when source schema time config is of type DatetimeRange",
     )
     run_localization_by_column_with_error(
-        iter_backends, df, from_schema, error, time_zone_column=None
+        iter_all_backends, df, from_schema, error, time_zone_column=None
     )
