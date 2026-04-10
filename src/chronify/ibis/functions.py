@@ -57,6 +57,45 @@ def read_query(
     return df
 
 
+def _normalize_timestamps(
+    df: pd.DataFrame,
+    configs: Sequence[TimeBaseModel],
+) -> pd.DataFrame:
+    """Normalize datetime columns so their pandas dtype matches the schema config.
+
+    - TIMESTAMP_NTZ + tz-aware input  → convert to UTC, then strip timezone
+    - TIMESTAMP_TZ  + tz-naive input  → localize as UTC
+    - matching dtype                  → no change
+
+    This runs before any backend-specific handling so that all backends receive
+    consistently typed data.
+    """
+    copied = False
+    for config in configs:
+        if not isinstance(config, _DATETIME_RANGES):
+            continue
+        col = config.time_column
+        if col not in df.columns:
+            continue
+        if not pd.api.types.is_datetime64_any_dtype(df[col]):
+            continue
+
+        is_tz_aware = isinstance(df[col].dtype, DatetimeTZDtype)
+
+        if config.dtype == TimeDataType.TIMESTAMP_NTZ and is_tz_aware:
+            if not copied:
+                df = df.copy()
+                copied = True
+            df[col] = df[col].dt.tz_convert("UTC").dt.tz_localize(None)
+        elif config.dtype == TimeDataType.TIMESTAMP_TZ and not is_tz_aware:
+            if not copied:
+                df = df.copy()
+                copied = True
+            df[col] = df[col].dt.tz_localize("UTC")
+
+    return df
+
+
 def write_table(
     backend: IbisBackend,
     df: pd.DataFrame | pa.Table,
@@ -65,6 +104,12 @@ def write_table(
     if_exists: str = "append",
 ) -> None:
     """Write a DataFrame to the database."""
+    if isinstance(df, pa.Table):
+        df = df.to_pandas()
+
+    _check_one_config_per_datetime_column(configs)
+    df = _normalize_timestamps(df, configs)
+
     match backend.name:
         case "duckdb":
             _write_to_duckdb(backend, df, table_name, if_exists)
@@ -185,12 +230,10 @@ def _convert_spark_output_for_datetime(df: pd.DataFrame, config: DatetimeRanges)
 
 def _write_to_duckdb(
     backend: IbisBackend,
-    df: pd.DataFrame | pa.Table,
+    df: pd.DataFrame,
     table_name: str,
     if_exists: str,
 ) -> None:
-    if isinstance(df, pa.Table):
-        df = df.to_pandas()
     match if_exists:
         case "append":
             backend.insert(table_name, df)
@@ -206,16 +249,14 @@ def _write_to_duckdb(
 
 def _write_to_sqlite(
     backend: IbisBackend,
-    df: pd.DataFrame | pa.Table,
+    df: pd.DataFrame,
     table_name: str,
     configs: Sequence[TimeBaseModel],
     if_exists: str,
 ) -> None:
-    _check_one_config_per_datetime_column(configs)
-
-    if isinstance(df, pa.Table):
-        df = df.to_pandas()
-
+    # SQLite-specific: ensure TZ timestamps are stored as UTC text.
+    # _normalize_timestamps already ran, so NTZ columns are tz-naive and
+    # TZ columns are tz-aware UTC. This step converts TZ to UTC for storage.
     copied = False
     for config in configs:
         if isinstance(config, _DATETIME_RANGES):
@@ -236,13 +277,10 @@ def _write_to_sqlite(
 
 def _write_to_spark(
     backend: IbisBackend,
-    df: pd.DataFrame | pa.Table,
+    df: pd.DataFrame,
     table_name: str,
     if_exists: str,
 ) -> None:
-    if isinstance(df, pa.Table):
-        df = df.to_pandas()
-
     match if_exists:
         case "append":
             backend.insert(table_name, df)

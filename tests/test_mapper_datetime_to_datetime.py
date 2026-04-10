@@ -247,8 +247,5 @@ def test_duplicated_configs_in_write_table(
     df = generate_datetime_dataframe(schema)
     configs = [schema.time_config, schema.time_config]
 
-    if iter_backends.name == "sqlite":
-        with pytest.raises(InvalidParameter, match="More than one datetime config found"):
-            write_table(iter_backends, df, schema.name, configs, if_exists="replace")
-    else:
+    with pytest.raises(InvalidParameter, match="More than one datetime config found"):
         write_table(iter_backends, df, schema.name, configs, if_exists="replace")
