@@ -216,16 +216,21 @@ def _convert_spark_output_for_datetime(df: pd.DataFrame, config: DatetimeRanges)
         return
 
     col = df[config.time_column]
-    if not pd.api.types.is_datetime64_any_dtype(col):
-        df[config.time_column] = pd.to_datetime(col, utc=True)
-        col = df[config.time_column]
 
     if config.dtype == TimeDataType.TIMESTAMP_TZ:
-        if not isinstance(col.dtype, DatetimeTZDtype):
-            df[config.time_column] = col.dt.tz_localize("UTC")
+        if not pd.api.types.is_datetime64_any_dtype(col):
+            col = pd.to_datetime(col, utc=True)
+        elif isinstance(col.dtype, DatetimeTZDtype):
+            col = col.dt.tz_convert("UTC")
+        else:
+            col = col.dt.tz_localize("UTC")
+        df[config.time_column] = col.dt.tz_localize(None).astype("datetime64[us]")
     else:
+        if not pd.api.types.is_datetime64_any_dtype(col):
+            col = pd.to_datetime(col, utc=False)
+            df[config.time_column] = col.astype("datetime64[us]")
         if isinstance(col.dtype, DatetimeTZDtype):
-            df[config.time_column] = col.dt.tz_convert(None)
+            df[config.time_column] = col.dt.tz_convert(None).astype("datetime64[us]")
 
 
 def _write_to_duckdb(

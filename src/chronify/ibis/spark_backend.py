@@ -1,7 +1,10 @@
 """Spark backend implementation for Ibis."""
 
 import uuid
+import shutil
 from typing import Any, cast
+from pathlib import Path
+from urllib.parse import urlparse, unquote
 
 import ibis
 import ibis.expr.types as ir
@@ -59,7 +62,13 @@ class SparkBackend(IbisBackend):
     ) -> ir.Table:
         if isinstance(obj, pd.DataFrame):
             obj = self._prepare_data_for_spark(obj)
-        return self._connection.create_table(name, obj=obj, schema=schema, overwrite=overwrite)
+        try:
+            return self._connection.create_table(name, obj=obj, schema=schema, overwrite=overwrite)
+        except Exception as exc:
+            if "LOCATION_ALREADY_EXISTS" not in str(exc):
+                raise
+            self._remove_managed_table_location(name)
+            return self._connection.create_table(name, obj=obj, schema=schema, overwrite=overwrite)
 
     def create_view(self, name: str, expr: ir.Table) -> ir.Table:
         return self._connection.create_view(name, expr, overwrite=False)
@@ -101,7 +110,15 @@ class SparkBackend(IbisBackend):
         where = " AND ".join(f"{_quote_identifier(c)} = :{p}" for c, p in zip(values, param_names))
         sql = f"DELETE FROM {quoted_name} WHERE {where}"
         args = dict(zip(param_names, values.values()))
-        self._session.sql(sql, args=args)
+        try:
+            self._session.sql(sql, args=args)
+        except Exception as exc:
+            if "does not support DELETE" not in str(exc):
+                raise
+            df = self._connection.execute(self.table(name))
+            for column, value in values.items():
+                df = df[df[column] != value]
+            self.create_table(name, obj=df, overwrite=True)
         logger.trace("Deleted rows from {} matching {}", name, values)
 
     def execute(self, expr: ir.Expr) -> pd.DataFrame:
@@ -142,6 +159,17 @@ class SparkBackend(IbisBackend):
 
     def reconnect(self) -> None:
         pass  # Spark sessions are long-lived
+
+    def _remove_managed_table_location(self, name: str) -> None:
+        location = self._session.conf.get("spark.sql.warehouse.dir", "spark-warehouse")
+        parsed = urlparse(location)
+        if parsed.scheme == "file":
+            warehouse = Path(unquote(parsed.path))
+        else:
+            warehouse = Path(location)
+        path = warehouse / name
+        if path.exists():
+            shutil.rmtree(path)
 
     @staticmethod
     def _prepare_data_for_spark(df: pd.DataFrame) -> pd.DataFrame:
