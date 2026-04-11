@@ -224,7 +224,7 @@ def _convert_spark_output_for_datetime(df: pd.DataFrame, config: DatetimeRanges)
             col = col.dt.tz_convert("UTC")
         else:
             col = col.dt.tz_localize("UTC")
-        df[config.time_column] = col.dt.tz_localize(None).astype("datetime64[us]")
+        df[config.time_column] = col.dt.as_unit("us")
     else:
         if not pd.api.types.is_datetime64_any_dtype(col):
             col = pd.to_datetime(col, utc=False)

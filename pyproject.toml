@@ -76,6 +76,8 @@ module = [
   "ibis.*",
   "pyarrow",
   "pyarrow.*",
+  "pyspark",
+  "pyspark.*",
 ]
 ignore_missing_imports = true
 
