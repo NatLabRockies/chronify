@@ -40,7 +40,7 @@ dependencies = [
 [project.optional-dependencies]
 spark = [
     "ibis-framework[pyspark]",
-    "pyspark >= 4.0",
+    "pyspark == 4.0.0",
 ]
 
 dev = [

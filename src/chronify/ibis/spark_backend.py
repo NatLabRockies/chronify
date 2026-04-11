@@ -55,10 +55,11 @@ class SparkBackend(IbisBackend):
         name: str,
         obj: pd.DataFrame | ir.Table | None = None,
         schema: ibis.Schema | None = None,
+        overwrite: bool = False,
     ) -> ir.Table:
         if isinstance(obj, pd.DataFrame):
             obj = self._prepare_data_for_spark(obj)
-        return self._connection.create_table(name, obj=obj, schema=schema, overwrite=False)
+        return self._connection.create_table(name, obj=obj, schema=schema, overwrite=overwrite)
 
     def create_view(self, name: str, expr: ir.Table) -> ir.Table:
         return self._connection.create_view(name, expr, overwrite=False)
@@ -138,7 +139,6 @@ class SparkBackend(IbisBackend):
     def dispose(self) -> None:
         if self._owns_session:
             self._connection.disconnect()
-            self._session.stop()
 
     def reconnect(self) -> None:
         pass  # Spark sessions are long-lived

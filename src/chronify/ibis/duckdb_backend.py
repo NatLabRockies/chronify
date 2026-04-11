@@ -36,8 +36,9 @@ class DuckDBBackend(IbisBackend):
         name: str,
         obj: pd.DataFrame | ir.Table | None = None,
         schema: ibis.Schema | None = None,
+        overwrite: bool = False,
     ) -> ir.Table:
-        return self._connection.create_table(name, obj=obj, schema=schema, overwrite=False)
+        return self._connection.create_table(name, obj=obj, schema=schema, overwrite=overwrite)
 
     def create_view(self, name: str, expr: ir.Table) -> ir.Table:
         return self._connection.create_view(name, expr, overwrite=False)

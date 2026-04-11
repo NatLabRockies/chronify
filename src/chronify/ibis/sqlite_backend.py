@@ -53,13 +53,14 @@ class SQLiteBackend(IbisBackend):
         name: str,
         obj: pd.DataFrame | ir.Table | None = None,
         schema: ibis.Schema | None = None,
+        overwrite: bool = False,
     ) -> ir.Table:
         if isinstance(obj, ir.Table):
             # SQLite CREATE TABLE AS SELECT loses datetime type info.
             # Execute the expression first, then create from the DataFrame.
             df = self._connection.execute(obj)
-            return self._connection.create_table(name, obj=df, overwrite=False)
-        return self._connection.create_table(name, obj=obj, schema=schema, overwrite=False)
+            return self._connection.create_table(name, obj=df, overwrite=overwrite)
+        return self._connection.create_table(name, obj=obj, schema=schema, overwrite=overwrite)
 
     def create_view(self, name: str, expr: ir.Table) -> ir.Table:
         return self._connection.create_view(name, expr, overwrite=False)

@@ -215,4 +215,4 @@ def _apply_mapping(  # noqa: C901
         write_parquet(backend, result, output_file, overwrite=True, config=to_schema.time_config)
         return
 
-    backend.create_table(to_schema.name, result)
+    backend.create_table(to_schema.name, result, overwrite=True)

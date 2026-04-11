@@ -40,6 +40,7 @@ class IbisBackend(ABC):
         name: str,
         obj: pd.DataFrame | ir.Table | None = None,
         schema: ibis.Schema | None = None,
+        overwrite: bool = False,
     ) -> ir.Table:
         """Create a table in the database.
 
@@ -51,6 +52,8 @@ class IbisBackend(ABC):
             Data to populate the table with.
         schema
             Schema to use if obj is None.
+        overwrite
+            If True, replace the table if it already exists.
 
         Returns
         -------
