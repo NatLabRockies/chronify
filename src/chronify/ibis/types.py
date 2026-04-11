@@ -1,8 +1,6 @@
 """Type conversion utilities for Ibis backends."""
 
-import ibis
 import ibis.expr.datatypes as dt
-import pandas as pd
 import pyarrow as pa
 
 # Mapping from user-facing string type names to Ibis data types
@@ -82,15 +80,6 @@ def get_duckdb_type_from_ibis(ibis_type: dt.DataType) -> str:
             return duckdb_name
     msg = f"Unsupported Ibis type for DuckDB: {ibis_type}"
     raise ValueError(msg)
-
-
-def get_ibis_types_from_dataframe(df: pd.DataFrame) -> dict[str, dt.DataType]:
-    """Infer Ibis types from a pandas DataFrame's columns.
-
-    Note: This uses ibis schema inference and does not require a DuckDB connection.
-    """
-    schema = ibis.Schema.from_pandas(df)
-    return dict(schema.items())
 
 
 def pyarrow_to_ibis_type(arrow_type: pa.DataType) -> dt.DataType:

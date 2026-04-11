@@ -236,6 +236,173 @@ def test_spark_time_zone_conversion(spark_store: Store) -> None:
     assert list(out_sorted["timestamp"]) == list(expected)
 
 
+def test_spark_delete_rows(spark_store: Store) -> None:
+    """delete_rows should remove matching rows and return the count."""
+    schema = TableSchema(
+        name="spark_del",
+        value_column="value",
+        time_config=DatetimeRange(
+            time_column="timestamp",
+            start=datetime(2020, 1, 1, tzinfo=ZoneInfo("UTC")),
+            length=2,
+            resolution=timedelta(hours=1),
+            interval_type=TimeIntervalType.PERIOD_BEGINNING,
+        ),
+        time_array_id_columns=["id"],
+    )
+    df = pd.DataFrame(
+        {
+            "id": [1, 1, 2, 2],
+            "timestamp": pd.to_datetime(
+                [
+                    "2020-01-01 00:00:00+00:00",
+                    "2020-01-01 01:00:00+00:00",
+                    "2020-01-01 00:00:00+00:00",
+                    "2020-01-01 01:00:00+00:00",
+                ],
+                utc=True,
+            ),
+            "value": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    spark_store.ingest_table(df, schema, skip_time_checks=True)
+    count = spark_store.delete_rows(schema.name, {"id": 1})
+    assert count == 2
+    out = spark_store.read_table(schema.name)
+    assert len(out) == 2
+    assert set(out["id"]) == {2}
+
+
+def test_spark_write_parquet_partitioned(spark_store: Store, tmp_path: Path) -> None:
+    """write_parquet with partition_by should produce partitioned output."""
+    schema = TableSchema(
+        name="spark_part",
+        value_column="value",
+        time_config=DatetimeRange(
+            time_column="timestamp",
+            start=datetime(2020, 1, 1, tzinfo=ZoneInfo("UTC")),
+            length=2,
+            resolution=timedelta(hours=1),
+            interval_type=TimeIntervalType.PERIOD_BEGINNING,
+        ),
+        time_array_id_columns=["id"],
+    )
+    df = pd.DataFrame(
+        {
+            "id": [1, 1, 2, 2],
+            "timestamp": pd.to_datetime(
+                [
+                    "2020-01-01 00:00:00+00:00",
+                    "2020-01-01 01:00:00+00:00",
+                    "2020-01-01 00:00:00+00:00",
+                    "2020-01-01 01:00:00+00:00",
+                ],
+                utc=True,
+            ),
+            "value": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    spark_store.ingest_table(df, schema, skip_time_checks=True)
+    outdir = tmp_path / "partitioned_output"
+    spark_store.backend.write_parquet(
+        spark_store.backend.table(schema.name),
+        str(outdir),
+        partition_by=["id"],
+    )
+    # Partitioned parquet creates subdirectories
+    assert outdir.exists()
+    subdirs = [p for p in outdir.iterdir() if p.is_dir() and p.name.startswith("id=")]
+    assert len(subdirs) == 2
+
+
+def test_spark_create_view_from_parquet(spark_store: Store, tmp_path: Path) -> None:
+    """create_view_from_parquet should create a readable view."""
+    schema = TableSchema(
+        name="spark_pq_src",
+        value_column="value",
+        time_config=DatetimeRange(
+            time_column="timestamp",
+            start=datetime(2020, 1, 1, tzinfo=ZoneInfo("UTC")),
+            length=2,
+            resolution=timedelta(hours=1),
+            interval_type=TimeIntervalType.PERIOD_BEGINNING,
+        ),
+        time_array_id_columns=["id"],
+    )
+    df = pd.DataFrame(
+        {
+            "id": [1, 1],
+            "timestamp": pd.to_datetime(
+                ["2020-01-01 00:00:00+00:00", "2020-01-01 01:00:00+00:00"],
+                utc=True,
+            ),
+            "value": [1.0, 2.0],
+        }
+    )
+    spark_store.ingest_table(df, schema, skip_time_checks=True)
+
+    # Write to parquet then create a view from it
+    outfile = tmp_path / "view_src.parquet"
+    spark_store.write_table_to_parquet(schema.name, outfile, overwrite=True)
+
+    from chronify.ibis.base import ObjectType
+
+    table_expr, obj_type = spark_store.backend.create_view_from_parquet(str(outfile), "pq_view")
+    assert obj_type == ObjectType.VIEW
+    result = spark_store.backend.execute(table_expr)
+    assert len(result) == 2
+
+
+def test_spark_create_and_drop_view(spark_store: Store) -> None:
+    """create_view and drop_view should work correctly."""
+    schema = TableSchema(
+        name="spark_view_src",
+        value_column="value",
+        time_config=DatetimeRange(
+            time_column="timestamp",
+            start=datetime(2020, 1, 1, tzinfo=ZoneInfo("UTC")),
+            length=2,
+            resolution=timedelta(hours=1),
+            interval_type=TimeIntervalType.PERIOD_BEGINNING,
+        ),
+        time_array_id_columns=["id"],
+    )
+    df = pd.DataFrame(
+        {
+            "id": [1, 1],
+            "timestamp": pd.to_datetime(
+                ["2020-01-01 00:00:00+00:00", "2020-01-01 01:00:00+00:00"],
+                utc=True,
+            ),
+            "value": [1.0, 2.0],
+        }
+    )
+    spark_store.ingest_table(df, schema, skip_time_checks=True)
+
+    expr = spark_store.backend.table(schema.name)
+    spark_store.backend.create_view("test_view", expr)
+    assert spark_store.backend.has_table("test_view")
+
+    spark_store.backend.drop_view("test_view")
+    assert not spark_store.backend.has_table("test_view")
+
+
+def test_spark_dispose(tmp_path: Path) -> None:
+    """dispose should not raise on an owned session."""
+    _require_java_home()
+    pyspark = pytest.importorskip("pyspark.sql")
+    warehouse_dir = tmp_path / "spark-warehouse-dispose"
+    session = (
+        pyspark.SparkSession.builder.master("local")
+        .config("spark.sql.session.timeZone", "UTC")
+        .config("spark.sql.parquet.outputTimestampType", "TIMESTAMP_MICROS")
+        .config("spark.sql.warehouse.dir", str(warehouse_dir))
+        .getOrCreate()
+    )
+    backend = SparkBackend(session=session)
+    backend.dispose()
+
+
 def test_spark_backend_rejects_non_utc_session() -> None:
     _require_java_home()
     pyspark = pytest.importorskip("pyspark.sql")
