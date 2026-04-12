@@ -14,7 +14,7 @@ from loguru import logger
 from pandas import DatetimeTZDtype
 
 from chronify.exceptions import InvalidOperation, InvalidParameter
-from chronify.ibis.base import IbisBackend, ObjectType
+from chronify.ibis.base import IbisBackend, ObjectType, _is_ddl
 
 
 class SparkBackend(IbisBackend):
@@ -186,7 +186,8 @@ class SparkBackend(IbisBackend):
     def execute_sql(self, query: str) -> None:
         logger.trace("execute_sql: {}", query)
         self._session.sql(query)
-        self._invalidate_table_cache()
+        if _is_ddl(query):
+            self._invalidate_table_cache()
 
     def execute_sql_to_df(self, query: str) -> pd.DataFrame:
         logger.trace("execute_sql_to_df: {}", query)

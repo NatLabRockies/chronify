@@ -10,7 +10,7 @@ import pandas as pd
 from loguru import logger
 
 from chronify.exceptions import ConflictingInputsError, InvalidOperation, InvalidParameter
-from chronify.ibis.base import IbisBackend, ObjectType
+from chronify.ibis.base import IbisBackend, ObjectType, _is_ddl
 
 
 class DuckDBBackend(IbisBackend):
@@ -123,6 +123,11 @@ class DuckDBBackend(IbisBackend):
         logger.trace("Deleted rows from {} matching {}", name, values)
 
     def execute(self, expr: ir.Expr) -> pd.DataFrame:
+        # Bypass Ibis's generic pandas materialization and use DuckDB's native
+        # cursor.fetch_df(), which is zero-copy from Arrow.
+        if isinstance(expr, ir.Table):
+            sql = self._connection.compile(expr)
+            return cast(pd.DataFrame, self._connection.con.execute(sql).fetch_df())
         return cast(pd.DataFrame, self._connection.execute(expr))
 
     def sql(self, query: str) -> ir.Table:
@@ -162,7 +167,8 @@ class DuckDBBackend(IbisBackend):
     def execute_sql(self, query: str) -> None:
         logger.trace("execute_sql: {}", query)
         self._connection.raw_sql(query)
-        self._invalidate_table_cache()
+        if _is_ddl(query):
+            self._invalidate_table_cache()
 
     def execute_sql_to_df(self, query: str) -> pd.DataFrame:
         logger.trace("execute_sql_to_df: {}", query)

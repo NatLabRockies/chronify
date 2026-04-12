@@ -11,7 +11,7 @@ import pandas as pd
 from loguru import logger
 
 from chronify.exceptions import ConflictingInputsError, InvalidOperation, InvalidParameter
-from chronify.ibis.base import IbisBackend, ObjectType
+from chronify.ibis.base import IbisBackend, ObjectType, _is_ddl
 
 
 def _adapt_value(v: Any) -> Any:
@@ -174,7 +174,8 @@ class SQLiteBackend(IbisBackend):
         con = self._connection.con
         con.execute(query)
         con.commit()
-        self._invalidate_table_cache()
+        if _is_ddl(query):
+            self._invalidate_table_cache()
 
     def execute_sql_to_df(self, query: str) -> pd.DataFrame:
         logger.trace("execute_sql_to_df: {}", query)

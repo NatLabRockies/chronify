@@ -1,5 +1,6 @@
 """Abstract base class for Ibis database backends."""
 
+import re
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from enum import StrEnum
@@ -9,6 +10,16 @@ import ibis
 import ibis.expr.types as ir
 import pandas as pd
 from loguru import logger
+
+_DDL_RE = re.compile(
+    r"^\s*(?:WITH\s+.+?\s+)?(CREATE|DROP|ALTER|TRUNCATE|RENAME)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _is_ddl(query: str) -> bool:
+    """Return True if the SQL statement changes the set of tables/views."""
+    return _DDL_RE.match(query) is not None
 
 
 class ObjectType(StrEnum):
@@ -143,7 +154,10 @@ class IbisBackend(ABC):
     def execute_sql(self, query: str) -> Any:
         """Execute a raw SQL statement (no result expected)."""
         logger.trace("execute_sql: {}", query)
-        return self.connection.raw_sql(query)
+        result = self.connection.raw_sql(query)
+        if _is_ddl(query):
+            self._invalidate_table_cache()
+        return result
 
     def execute_sql_to_df(self, query: str) -> pd.DataFrame:
         """Execute a raw SQL query and return a DataFrame."""
