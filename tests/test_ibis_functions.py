@@ -1,4 +1,4 @@
-"""Tests for ibis/functions.py edge cases and uncovered branches."""
+"""Tests for IbisBackend read/write helpers and their normalization hooks."""
 
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -9,13 +9,12 @@ import pytest
 
 from chronify.exceptions import InvalidOperation, InvalidParameter
 from chronify.ibis import make_backend
-from chronify.ibis.functions import (
+from chronify.ibis.base import (
     _check_one_config_per_datetime_column,
-    _convert_database_output_for_datetime,
-    _convert_spark_output_for_datetime,
     _normalize_timestamps,
-    write_table,
 )
+from chronify.ibis.sqlite_backend import _convert_database_output_for_datetime
+from chronify.ibis.spark_backend import _convert_spark_output_for_datetime
 from chronify.time import TimeIntervalType
 from chronify.time_configs import DatetimeRange
 
@@ -189,7 +188,7 @@ class TestWriteTable:
                 "value": [1.0, 2.0],
             }
         )
-        write_table(backend, pa_table, "pa_test", [config], if_exists="fail")
+        backend.write_table(pa_table, "pa_test", [config], if_exists="fail")
         assert backend.has_table("pa_test")
         df = backend.execute(backend.table("pa_test"))
         assert len(df) == 2
@@ -214,7 +213,7 @@ class TestWriteTable:
             )
 
         monkeypatch.setattr(backend, "create_table", create_table)
-        write_table(backend, pa_table, "pa_test_arrow", [config], if_exists="fail")
+        backend.write_table(pa_table, "pa_test_arrow", [config], if_exists="fail")
         assert seen_arrow
         backend.dispose()
 
@@ -227,22 +226,7 @@ class TestWriteTable:
                 "value": [1.0, 2.0],
             }
         )
-        write_table(backend, df, "test_tbl", [config], if_exists="fail")
+        backend.write_table(df, "test_tbl", [config], if_exists="fail")
         with pytest.raises(InvalidOperation, match="Invalid if_exists"):
-            write_table(backend, df, "test_tbl", [config], if_exists="invalid")
+            backend.write_table(df, "test_tbl", [config], if_exists="invalid")
         backend.dispose()
-
-    def test_unsupported_backend(self):
-        """A backend with an unknown name should raise NotImplementedError."""
-        from unittest.mock import MagicMock
-
-        backend = MagicMock()
-        backend.name = "unknown_db"
-        config = _make_ntz_config()
-        df = pd.DataFrame(
-            {
-                "timestamp": pd.to_datetime(["2020-01-01 00:00:00", "2020-01-01 01:00:00"]),
-            }
-        )
-        with pytest.raises(NotImplementedError, match="Unsupported backend"):
-            write_table(backend, df, "test", [config], if_exists="fail")

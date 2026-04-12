@@ -6,13 +6,12 @@ import pandas as pd
 from loguru import logger
 
 from chronify.ibis.base import IbisBackend, ObjectType
-from chronify.ibis.functions import write_parquet, write_table, create_view_from_parquet
 from chronify.models import TableSchema, MappingTableSchema
 from chronify.exceptions import ConflictingInputsError, InvalidOperation
 from chronify.time_series_checker import check_timestamps
 from chronify.time import TimeIntervalType, ResamplingOperationType, AggregationType
 from chronify.time_configs import TimeBasedDataAdjustment
-from chronify.utils.path_utils import to_path
+from chronify.utils.path_utils import check_overwrite, to_path
 
 
 class TimeSeriesMapperBase(abc.ABC):
@@ -87,8 +86,7 @@ def apply_mapping(
     check_mapped_timestamps: bool = False,
 ) -> None:
     """Apply mapping to create result table with process to clean up and roll back if checks fail."""
-    write_table(
-        backend,
+    backend.write_table(
         df_mapping,
         mapping_schema.name,
         mapping_schema.time_configs,
@@ -107,7 +105,9 @@ def apply_mapping(
         if check_mapped_timestamps:
             if output_file is not None:
                 output_file = to_path(output_file)
-                created_tmp_obj = create_view_from_parquet(backend, output_file, to_schema.name)
+                _, created_tmp_obj = backend.create_view_from_parquet(
+                    str(output_file), to_schema.name
+                )
             try:
                 check_timestamps(
                     backend,
@@ -212,7 +212,8 @@ def _apply_mapping(  # noqa: C901
 
     if output_file is not None:
         output_file = to_path(output_file)
-        write_parquet(backend, result, output_file, overwrite=True, config=to_schema.time_config)
+        check_overwrite(output_file, overwrite=True)
+        backend.write_parquet(result, str(output_file))
         return
 
     backend.create_table(to_schema.name, result, overwrite=True)

@@ -13,7 +13,6 @@ from chronify.time_configs import (
 )
 from chronify.models import TableSchema, PivotedTableSchema
 from chronify.store import Store
-from chronify.ibis.functions import write_table, read_query
 from chronify.time_series_mapper import map_time
 
 
@@ -24,7 +23,7 @@ def iter_store(iter_backends):
 
 def ingest_csv(backend, csv_file: Path, name: str, time_configs: list[TimeConfig]):
     data = pd.read_csv(csv_file)
-    write_table(backend, data, name, time_configs, if_exists="replace")
+    backend.write_table(data, name, time_configs, if_exists="replace")
 
 
 def test_MDH_mapper(time_series_NMDH, iter_store: Store):
@@ -68,7 +67,7 @@ def test_MDH_mapper(time_series_NMDH, iter_store: Store):
     map_time(iter_store.backend, from_schema, to_schema, check_mapped_timestamps=True)
 
     expr = iter_store.backend.sql(f"SELECT * FROM {to_schema.name}")
-    mapped_table = read_query(iter_store.backend, expr, to_schema.time_config).sort_values(
+    mapped_table = iter_store.backend.read_query(expr, to_schema.time_config).sort_values(
         "timestamp"
     )
     assert np.array_equal(mapped_table["value"].to_numpy(), np.arange(25, 73))
@@ -117,7 +116,7 @@ def test_YMDH_mapper(time_series_NYMDH, iter_store):
     map_time(iter_store.backend, from_schema, to_schema, check_mapped_timestamps=True)
 
     expr = iter_store.backend.sql(f"SELECT * FROM {to_schema.name}")
-    mapped_table = read_query(iter_store.backend, expr, to_schema.time_config).sort_values(
+    mapped_table = iter_store.backend.read_query(expr, to_schema.time_config).sort_values(
         "timestamp"
     )
     assert np.array_equal(mapped_table["value"].to_numpy(), np.arange(25, 73))
@@ -156,7 +155,7 @@ def test_NYMDPV_mapper(time_series_NYMDPV, iter_store: Store):
     map_time(iter_store.backend, from_schema, to_schema, check_mapped_timestamps=True)
 
     expr = iter_store.backend.sql(f"SELECT * FROM {to_schema.name}")
-    mapped_table = read_query(iter_store.backend, expr, to_schema.time_config).sort_values(
+    mapped_table = iter_store.backend.read_query(expr, to_schema.time_config).sort_values(
         "timestamp"
     )
     values = np.concatenate(

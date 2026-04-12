@@ -5,7 +5,6 @@ from typing import Optional
 import pandas as pd
 
 from chronify.ibis.base import IbisBackend
-from chronify.ibis.functions import read_query
 from chronify.models import TableSchema, MappingTableSchema
 from chronify.exceptions import InvalidParameter
 from chronify.time_range_generator_factory import make_time_range_generator
@@ -96,7 +95,7 @@ class MapperRepresentativeTimeToDatetime(TimeSeriesMapperBase):
             assert tz_col is not None, "Expecting a time zone column for REPRESENTATIVE time"
             table = self._backend.table(self._from_schema.name)
             expr = table.select(tz_col).distinct().filter(table[tz_col].notnull())
-            time_zones = read_query(self._backend, expr, self._from_time_config)[tz_col].to_list()
+            time_zones = self._backend.read_query(expr, self._from_time_config)[tz_col].to_list()
             df = self._generator.create_tz_aware_mapping_dataframe(
                 dft, time_col, time_zones, tz_col
             )

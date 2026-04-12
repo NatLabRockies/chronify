@@ -7,7 +7,6 @@ from typing import Any
 import pandas as pd
 
 from chronify.ibis import IbisBackend
-from chronify.ibis.functions import read_query, write_table
 from chronify.time_zone_converter import (
     TimeZoneConverter,
     TimeZoneConverterByColumn,
@@ -89,7 +88,7 @@ def ingest_data(
     df: pd.DataFrame,
     schema: TableSchema,
 ) -> None:
-    write_table(backend, df, schema.name, [schema.time_config], if_exists="replace")
+    backend.write_table(df, schema.name, [schema.time_config], if_exists="replace")
 
 
 def get_mapped_dataframe(
@@ -98,7 +97,7 @@ def get_mapped_dataframe(
     time_config: DatetimeRange,
 ) -> pd.DataFrame:
     expr = backend.sql(f"select * from {table_name}")
-    queried = read_query(backend, expr, time_config)
+    queried = backend.read_query(expr, time_config)
     queried = queried.sort_values(by=["id", "timestamp"]).reset_index(drop=True)
     return queried
 

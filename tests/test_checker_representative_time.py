@@ -3,7 +3,6 @@ import pytest
 import pandas as pd
 
 from chronify.ibis import IbisBackend
-from chronify.ibis.functions import write_table
 from chronify.models import TableSchema
 from chronify.time_series_checker import check_timestamps
 from chronify.exceptions import InvalidTable
@@ -12,7 +11,7 @@ from chronify.exceptions import InvalidTable
 def ingest_data_and_check(
     backend: IbisBackend, df: pd.DataFrame, schema: TableSchema, error: tuple[any, str]
 ) -> None:
-    write_table(backend, df, schema.name, [schema.time_config], if_exists="replace")
+    backend.write_table(df, schema.name, [schema.time_config], if_exists="replace")
 
     if error:
         with pytest.raises(error[0], match=error[1]):

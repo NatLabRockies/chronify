@@ -19,13 +19,6 @@ from chronify.exceptions import (
 )
 from chronify.csv_io import read_csv
 from chronify.ibis import IbisBackend, ObjectType, make_backend
-from chronify.ibis.functions import (
-    create_view_from_parquet,
-    read_query,
-    read_table,
-    write_parquet,
-    write_table,
-)
 from chronify.models import (
     CsvTableSchema,
     PivotedTableSchema,
@@ -182,7 +175,7 @@ class Store:
 
     def _create_view_from_parquet(self, path: Path | str, schema: TableSchema) -> "ObjectType":
         """Create a view in the database from a Parquet file."""
-        obj_type = create_view_from_parquet(self._backend, to_path(path), schema.name)
+        _, obj_type = self._backend.create_view_from_parquet(str(to_path(path)), schema.name)
         self._schema_mgr.add_schema(schema)
         return obj_type
 
@@ -389,23 +382,11 @@ class Store:
         check_columns(df.columns, schema.list_columns())
 
         if not self._backend.has_table(schema.name):
-            write_table(
-                self._backend,
-                df,
-                schema.name,
-                [schema.time_config],
-                if_exists="fail",
-            )
+            self._backend.write_table(df, schema.name, [schema.time_config], if_exists="fail")
             self._schema_mgr.add_schema(schema)
             return True
         else:
-            write_table(
-                self._backend,
-                df,
-                schema.name,
-                [schema.time_config],
-                if_exists="append",
-            )
+            self._backend.write_table(df, schema.name, [schema.time_config], if_exists="append")
             return False
 
     def map_table_time_config(
@@ -733,12 +714,12 @@ class Store:
             expr = self._backend.sql(query)
         else:
             expr = query
-        return read_query(self._backend, expr, schema.time_config)
+        return self._backend.read_query(expr, schema.time_config)
 
     def read_table(self, name: str) -> pd.DataFrame:
         """Return the table as a pandas DataFrame."""
         schema = self._schema_mgr.get_schema(name)
-        return read_table(self._backend, name, schema.time_config)
+        return self._backend.read_table(name, schema.time_config)
 
     def read_raw_query(self, query: str) -> pd.DataFrame:
         """Execute a query directly on the backend and return the results as a DataFrame.
@@ -783,15 +764,10 @@ class Store:
             Optional table/view name used to look up the time config for
             backend-specific timestamp normalization (e.g. Spark).
         """
-        config = self._schema_mgr.get_schema(name).time_config if name else None
-        write_parquet(
-            self._backend,
-            stmt,
-            to_path(file_path),
-            overwrite=overwrite,
-            partition_columns=partition_columns,
-            config=config,
-        )
+        output_file = to_path(file_path)
+        check_overwrite(output_file, overwrite)
+        expr = self._backend.sql(stmt) if isinstance(stmt, str) else stmt
+        self._backend.write_parquet(expr, str(output_file), partition_by=partition_columns)
 
     def write_table_to_parquet(
         self,
@@ -806,14 +782,9 @@ class Store:
             raise TableNotStored(msg)
 
         expr = self._backend.table(name)
-        write_parquet(
-            self._backend,
-            expr,
-            to_path(file_path),
-            overwrite=overwrite,
-            partition_columns=partition_columns,
-            config=self._schema_mgr.get_schema(name).time_config,
-        )
+        output_file = to_path(file_path)
+        check_overwrite(output_file, overwrite)
+        self._backend.write_parquet(expr, str(output_file), partition_by=partition_columns)
         logger.info("Wrote table or view to {}", file_path)
 
     def delete_rows(

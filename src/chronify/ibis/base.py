@@ -2,25 +2,99 @@
 
 import re
 from abc import ABC, abstractmethod
+from collections import Counter
 from contextlib import contextmanager
 from enum import StrEnum
-from typing import Any, Generator, cast
+from typing import Any, Generator, Sequence, cast
 
 import ibis
 import ibis.expr.types as ir
 import pandas as pd
 import pyarrow as pa
 from loguru import logger
+from pandas import DatetimeTZDtype
+
+from chronify.exceptions import InvalidOperation, InvalidParameter
+from chronify.time import TimeDataType
+from chronify.time_configs import (
+    DatetimeRange,
+    DatetimeRangeBase,
+    DatetimeRangeWithTZColumn,
+    TimeBaseModel,
+)
 
 _DDL_RE = re.compile(
     r"^\s*(?:WITH\s+.+?\s+)?(CREATE|DROP|ALTER|TRUNCATE|RENAME)\b",
     re.IGNORECASE | re.DOTALL,
 )
 
+_DATETIME_RANGES: tuple[type, ...] = (DatetimeRange, DatetimeRangeWithTZColumn)
+DatetimeRanges = DatetimeRange | DatetimeRangeWithTZColumn
+
 
 def _is_ddl(query: str) -> bool:
     """Return True if the SQL statement changes the set of tables/views."""
     return _DDL_RE.match(query) is not None
+
+
+def _check_one_config_per_datetime_column(configs: Sequence[TimeBaseModel]) -> None:
+    time_col_count = Counter(
+        config.time_column for config in configs if isinstance(config, DatetimeRangeBase)
+    )
+    time_col_dup = {k: v for k, v in time_col_count.items() if v > 1}
+    if time_col_dup:
+        msg = f"More than one datetime config found for: {time_col_dup}"
+        raise InvalidParameter(msg)
+
+
+def _normalize_timestamps(
+    df: pd.DataFrame,
+    configs: Sequence[TimeBaseModel],
+) -> pd.DataFrame:
+    """Normalize datetime columns so their pandas dtype matches the schema config."""
+    copied = False
+    for config in configs:
+        if not isinstance(config, _DATETIME_RANGES):
+            continue
+        col = config.time_column
+        if col not in df.columns:
+            continue
+        if not pd.api.types.is_datetime64_any_dtype(df[col]):
+            continue
+
+        is_tz_aware = isinstance(df[col].dtype, DatetimeTZDtype)
+
+        if config.dtype == TimeDataType.TIMESTAMP_NTZ and is_tz_aware:
+            if not copied:
+                df = df.copy()
+                copied = True
+            df[col] = df[col].dt.tz_convert("UTC").dt.tz_localize(None)
+        elif config.dtype == TimeDataType.TIMESTAMP_TZ and not is_tz_aware:
+            if not copied:
+                df = df.copy()
+                copied = True
+            df[col] = df[col].dt.tz_localize("UTC")
+
+    return df
+
+
+def _arrow_needs_timestamp_normalization(
+    table: pa.Table,
+    configs: Sequence[TimeBaseModel],
+) -> bool:
+    fields = {field.name: field.type for field in table.schema}
+    for config in configs:
+        if not isinstance(config, _DATETIME_RANGES):
+            continue
+        arrow_type = fields.get(config.time_column)
+        if arrow_type is None or not pa.types.is_timestamp(arrow_type):
+            continue
+        timezone = arrow_type.tz
+        if config.dtype == TimeDataType.TIMESTAMP_NTZ and timezone is not None:
+            return True
+        if config.dtype == TimeDataType.TIMESTAMP_TZ and timezone is None:
+            return True
+    return False
 
 
 class ObjectType(StrEnum):
@@ -108,7 +182,8 @@ class IbisBackend(ABC):
 
     @abstractmethod
     def execute(self, expr: ir.Expr) -> pd.DataFrame:
-        """Execute an ibis expression and return a DataFrame."""
+        """Execute an ibis expression and return a DataFrame. Must not be called
+        for large tables."""
 
     @abstractmethod
     def sql(self, query: str) -> ir.Table:
@@ -164,6 +239,71 @@ class IbisBackend(ABC):
         """Execute a raw SQL query and return a DataFrame."""
         logger.trace("execute_sql_to_df: {}", query)
         return cast(pd.DataFrame, self.connection.raw_sql(query).fetch_df())
+
+    def read_table(self, name: str, config: TimeBaseModel) -> pd.DataFrame:
+        """Return the named table as a pandas DataFrame, normalized for this backend."""
+        return self.read_query(self.table(name), config)
+
+    def read_query(self, expr: ir.Table, config: TimeBaseModel) -> pd.DataFrame:
+        """Execute an Ibis expression and return a normalized pandas DataFrame."""
+        df = self.execute(expr)
+        if isinstance(config, _DATETIME_RANGES):
+            self._post_read_normalize(df, config)
+        return df
+
+    def write_table(
+        self,
+        data: pd.DataFrame | pa.Table,
+        name: str,
+        configs: Sequence[TimeBaseModel],
+        if_exists: str = "append",
+    ) -> None:
+        """Write tabular data to the database, applying backend-specific normalization."""
+        _check_one_config_per_datetime_column(configs)
+        prepared = self._prepare_write_data(data, configs)
+        self._apply_if_exists(prepared, name, if_exists)
+
+    def _post_read_normalize(self, df: pd.DataFrame, config: DatetimeRanges) -> None:
+        """Backend-specific in-place normalization of a read DataFrame.
+
+        Default: no-op. Backends whose drivers return non-canonical datetime
+        types should override.
+        """
+
+    def _prepare_write_data(
+        self,
+        data: pd.DataFrame | pa.Table,
+        configs: Sequence[TimeBaseModel],
+    ) -> pd.DataFrame | pa.Table:
+        """Normalize data before insert/create_table.
+
+        Default behavior is the DuckDB path: accept Arrow natively when possible,
+        otherwise convert to pandas to normalize tz-sensitive columns. Subclasses
+        that cannot ingest Arrow directly should convert here.
+        """
+        if isinstance(data, pa.Table) and _arrow_needs_timestamp_normalization(data, configs):
+            data = data.to_pandas()
+        if isinstance(data, pd.DataFrame):
+            data = _normalize_timestamps(data, configs)
+        return data
+
+    def _apply_if_exists(
+        self,
+        data: pd.DataFrame | pa.Table,
+        name: str,
+        if_exists: str,
+    ) -> None:
+        match if_exists:
+            case "append":
+                self.insert(name, data)
+            case "replace":
+                self.drop_table(name)
+                self.create_table(name, data)
+            case "fail":
+                self.create_table(name, data)
+            case _:
+                msg = f"Invalid if_exists value: {if_exists}"
+                raise InvalidOperation(msg)
 
     def dispose(self) -> None:
         """Dispose of the backend connection."""

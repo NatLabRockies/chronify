@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 from chronify.ibis.base import IbisBackend
-from chronify.ibis.functions import read_query
 from chronify.models import TableSchema, MappingTableSchema
 from chronify.exceptions import InvalidParameter, ConflictingInputsError
 from chronify.time_series_mapper_base import TimeSeriesMapperBase, apply_mapping
@@ -208,7 +207,7 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
 
         table = self._backend.table(self._from_schema.name)
         expr = table.select(tz_col).distinct().filter(table[tz_col].notnull())
-        time_zones = read_query(self._backend, expr, self._from_time_config)[tz_col].to_list()
+        time_zones = self._backend.read_query(expr, self._from_time_config)[tz_col].to_list()
 
         from_time_config = self._from_time_config.model_copy(
             update={"time_column": from_time_col, "time_zone_column": from_tz_col}
@@ -272,7 +271,7 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
 
         table = self._backend.table(self._from_schema.name)
         expr = table.select(tz_col).distinct().filter(table[tz_col].notnull())
-        time_zones = read_query(self._backend, expr, self._from_time_config)[tz_col].to_list()
+        time_zones = self._backend.read_query(expr, self._from_time_config)[tz_col].to_list()
 
         from_time_config = self._from_time_config.model_copy(
             update={"time_column": from_time_col, "time_zone_column": from_tz_col}

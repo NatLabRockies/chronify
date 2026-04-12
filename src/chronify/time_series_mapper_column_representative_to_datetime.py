@@ -7,7 +7,6 @@ from datetime import datetime
 
 from chronify.exceptions import InvalidParameter, InvalidValue
 from chronify.ibis.base import IbisBackend
-from chronify.ibis.functions import write_table
 from chronify.time_series_mapper_base import TimeSeriesMapperBase, apply_mapping
 from chronify.time_configs import (
     YearMonthDayHourTimeNTZ,
@@ -136,8 +135,7 @@ class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
             f"SELECT DISTINCT {period_col} FROM {self._from_schema.name}"
         )
         df_mapping = generate_period_mapping(df_periods.iloc[:, 0])
-        write_table(
-            self._backend,
+        self._backend.write_table(
             df_mapping,
             mapping_table_name,
             [self._from_time_config],

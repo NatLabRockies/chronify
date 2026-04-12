@@ -5,7 +5,6 @@ from zoneinfo import ZoneInfo
 from typing import Any, Optional
 
 from chronify.ibis import IbisBackend
-from chronify.ibis.functions import read_query, write_table
 from chronify.time_series_mapper import map_time
 from chronify.time_configs import (
     DatetimeRange,
@@ -148,7 +147,7 @@ def run_test(
     wrap_time_allowed: bool = False,
 ) -> None:
     # Ingest
-    write_table(backend, df, from_schema.name, [from_schema.time_config], if_exists="replace")
+    backend.write_table(df, from_schema.name, [from_schema.time_config], if_exists="replace")
 
     # Map
     if error:
@@ -174,7 +173,7 @@ def run_test(
 
 def get_output_table(backend: IbisBackend, to_schema: TableSchema) -> pd.DataFrame:
     expr = backend.sql(f"select * from {to_schema.name}")
-    queried = read_query(backend, expr, to_schema.time_config)
+    queried = backend.read_query(expr, to_schema.time_config)
     return queried
 
 

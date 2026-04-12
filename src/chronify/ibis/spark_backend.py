@@ -3,7 +3,7 @@
 import uuid
 import shutil
 from contextlib import contextmanager
-from typing import Any, Generator, cast
+from typing import Any, Generator, Sequence, cast
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 
@@ -15,7 +15,15 @@ from loguru import logger
 from pandas import DatetimeTZDtype
 
 from chronify.exceptions import InvalidOperation, InvalidParameter
-from chronify.ibis.base import IbisBackend, ObjectType, _is_ddl
+from chronify.ibis.base import (
+    DatetimeRanges,
+    IbisBackend,
+    ObjectType,
+    TimeBaseModel,
+    TimeDataType,
+    _is_ddl,
+    _normalize_timestamps,
+)
 
 
 class SparkBackend(IbisBackend):
@@ -216,6 +224,20 @@ class SparkBackend(IbisBackend):
         if path.exists():
             shutil.rmtree(path)
 
+    def _post_read_normalize(self, df: pd.DataFrame, config: DatetimeRanges) -> None:
+        """Spark returns tz-naive nanosecond timestamps; coerce to schema dtype + µs unit."""
+        _convert_spark_output_for_datetime(df, config)
+
+    def _prepare_write_data(
+        self,
+        data: pd.DataFrame | pa.Table,
+        configs: Sequence[TimeBaseModel],
+    ) -> pd.DataFrame:
+        """Spark ingestion goes through createDataFrame(pandas); Arrow must be converted."""
+        if isinstance(data, pa.Table):
+            data = data.to_pandas()
+        return _normalize_timestamps(data, configs)
+
     @staticmethod
     def _prepare_data_for_spark(df: pd.DataFrame) -> pd.DataFrame:
         """Normalize tz-aware pandas timestamps for Spark ingestion.
@@ -239,6 +261,29 @@ class SparkBackend(IbisBackend):
                 f"timestamp semantics, got {time_zone!r}."
             )
             raise InvalidParameter(msg)
+
+
+def _convert_spark_output_for_datetime(df: pd.DataFrame, config: DatetimeRanges) -> None:
+    """Convert DataFrame datetime columns after Spark output."""
+    if config.time_column not in df.columns:
+        return
+
+    col = df[config.time_column]
+
+    if config.dtype == TimeDataType.TIMESTAMP_TZ:
+        if not pd.api.types.is_datetime64_any_dtype(col):
+            col = pd.to_datetime(col, utc=True)
+        elif isinstance(col.dtype, DatetimeTZDtype):
+            col = col.dt.tz_convert("UTC")
+        else:
+            col = col.dt.tz_localize("UTC")
+        df[config.time_column] = col.dt.as_unit("us")
+    else:
+        if not pd.api.types.is_datetime64_any_dtype(col):
+            col = pd.to_datetime(col, utc=False)
+            df[config.time_column] = col.astype("datetime64[us]")
+        if isinstance(col.dtype, DatetimeTZDtype):
+            df[config.time_column] = col.dt.tz_convert(None).astype("datetime64[us]")
 
 
 def _validate_insert_columns(

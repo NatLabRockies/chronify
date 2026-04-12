@@ -5,7 +5,6 @@ import pandas as pd
 
 from chronify.exceptions import InvalidTable
 from chronify.ibis.base import IbisBackend
-from chronify.ibis.functions import read_query
 from chronify.models import TableSchema
 from chronify.time_configs import DatetimeRangeWithTZColumn
 from chronify.time_range_generator_factory import make_time_range_generator
@@ -72,7 +71,7 @@ class TimeSeriesChecker:
         expr = table.select(time_columns).distinct()
         for col in time_columns:
             expr = expr.filter(table[col].notnull())
-        df = read_query(self._backend, expr, self._schema.time_config)
+        df = self._backend.read_query(expr, self._schema.time_config)
         actual = self._time_generator.list_distinct_timestamps_from_dataframe(df)
         expected = sorted(set(expected))  # drop duplicates for tz-naive prevailing time
         check_timestamp_lists(actual, expected)
@@ -91,7 +90,7 @@ class TimeSeriesChecker:
         expr = table.select(time_columns).distinct()
         for col in time_columns:
             expr = expr.filter(table[col].notnull())
-        df = read_query(self._backend, expr, self._schema.time_config)
+        df = self._backend.read_query(expr, self._schema.time_config)
         actual_dct = self._time_generator.list_distinct_timestamps_by_time_zone_from_dataframe(df)
         if sorted(expected_dct.keys()) != sorted(actual_dct.keys()):
             msg = (

@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 
 from chronify.ibis import IbisBackend
-from chronify.ibis.functions import read_query, write_table
 from chronify.time_series_mapper import map_time
 from chronify.time_configs import DatetimeRange
 from chronify.models import TableSchema
@@ -62,7 +61,7 @@ def ingest_data(
     df: pd.DataFrame,
     schema: TableSchema,
 ) -> None:
-    write_table(backend, df, schema.name, [schema.time_config], if_exists="replace")
+    backend.write_table(df, schema.name, [schema.time_config], if_exists="replace")
 
 
 def run_test_with_error(
@@ -87,7 +86,7 @@ def get_mapped_results(
     map_time(backend, from_schema, to_schema, check_mapped_timestamps=True)
 
     expr = backend.sql(f"select * from {to_schema.name}")
-    queried = read_query(backend, expr, to_schema.time_config)
+    queried = backend.read_query(expr, to_schema.time_config)
     queried = queried.sort_values(by=["id", "timestamp"]).reset_index(drop=True)[df.columns]
 
     return queried
@@ -248,4 +247,4 @@ def test_duplicated_configs_in_write_table(
     configs = [schema.time_config, schema.time_config]
 
     with pytest.raises(InvalidParameter, match="More than one datetime config found"):
-        write_table(iter_backends, df, schema.name, configs, if_exists="replace")
+        iter_backends.write_table(df, schema.name, configs, if_exists="replace")

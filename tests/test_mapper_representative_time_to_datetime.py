@@ -6,7 +6,6 @@ from typing import Any, Optional
 import pandas as pd
 
 from chronify.ibis import IbisBackend
-from chronify.ibis.functions import read_query, write_table
 from chronify.time_series_mapper import map_time
 from chronify.time_configs import DatetimeRange
 from chronify.models import TableSchema
@@ -46,7 +45,7 @@ def run_test(
     error: Optional[tuple[Any, str]],
 ) -> None:
     # Ingest
-    write_table(backend, df, from_schema.name, [from_schema.time_config], if_exists="replace")
+    backend.write_table(df, from_schema.name, [from_schema.time_config], if_exists="replace")
 
     # Map
     if error:
@@ -57,7 +56,7 @@ def run_test(
 
         # Check mapped table
         expr = backend.sql(f"select * from {to_schema.name}")
-        queried = read_query(backend, expr, to_schema.time_config)
+        queried = backend.read_query(expr, to_schema.time_config)
         queried = queried.sort_values(by=["id", "timestamp"]).reset_index(drop=True)
 
         truth = generate_datetime_data(to_schema.time_config)

@@ -6,7 +6,6 @@ import pandas as pd
 import pytest
 
 from chronify.ibis import IbisBackend
-from chronify.ibis.functions import write_table
 from chronify.exceptions import InvalidTable
 from chronify.models import TableSchema
 from chronify.time import TimeIntervalType
@@ -73,7 +72,7 @@ def _run_test(
         time_array_id_columns=["generator"],
         value_column="value",
     )
-    write_table(backend, df, schema.name, [schema.time_config], if_exists="replace")
+    backend.write_table(df, schema.name, [schema.time_config], if_exists="replace")
 
     if message is None:
         check_timestamps(backend, schema.name, schema)

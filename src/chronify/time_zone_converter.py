@@ -6,7 +6,6 @@ from pathlib import Path
 import pandas as pd
 
 from chronify.ibis.base import IbisBackend
-from chronify.ibis.functions import read_query
 from chronify.models import TableSchema, MappingTableSchema
 from chronify.time_configs import (
     DatetimeRangeBase,
@@ -280,7 +279,7 @@ class TimeZoneConverterByColumn(TimeZoneConverterBase):
             .distinct()
             .filter(table[self.time_zone_column].notnull())
         )
-        time_zones = read_query(self._backend, expr, self._from_schema.time_config)[
+        time_zones = self._backend.read_query(expr, self._from_schema.time_config)[
             self.time_zone_column
         ].to_list()
         time_zones = [None if tz == "None" else ZoneInfo(tz) for tz in time_zones]
