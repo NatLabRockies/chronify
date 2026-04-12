@@ -240,10 +240,6 @@ class IbisBackend(ABC):
         logger.trace("execute_sql_to_df: {}", query)
         return cast(pd.DataFrame, self.connection.raw_sql(query).fetch_df())
 
-    def read_table(self, name: str, config: TimeBaseModel) -> pd.DataFrame:
-        """Return the named table as a pandas DataFrame, normalized for this backend."""
-        return self.read_query(self.table(name), config)
-
     def read_query(self, expr: ir.Table, config: TimeBaseModel) -> pd.DataFrame:
         """Execute an Ibis expression and return a normalized pandas DataFrame."""
         df = self.execute(expr)

@@ -77,7 +77,7 @@ store.create_view_from_parquet("data.parquet")
 
 Verify the data:
 ```python
-store.read_table(schema.name).head()
+store.read_table(schema.name).execute().head()
 ```
 ```
             timestamp  id     value

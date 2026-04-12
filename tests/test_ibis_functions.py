@@ -13,7 +13,6 @@ from chronify.ibis.base import (
     _check_one_config_per_datetime_column,
     _normalize_timestamps,
 )
-from chronify.ibis.sqlite_backend import _convert_database_output_for_datetime
 from chronify.ibis.spark_backend import _convert_spark_output_for_datetime
 from chronify.time import TimeIntervalType
 from chronify.time_configs import DatetimeRange
@@ -80,48 +79,6 @@ class TestCheckOneConfigPerDatetimeColumn:
         configs = [_make_tz_config("timestamp"), _make_tz_config("timestamp")]
         with pytest.raises(InvalidParameter, match="More than one datetime config"):
             _check_one_config_per_datetime_column(configs)
-
-
-class TestConvertDatabaseOutputForDatetime:
-    def test_tz_with_object_dtype(self):
-        config = _make_tz_config()
-        df = pd.DataFrame({"timestamp": ["2020-01-01 00:00:00", "2020-01-01 01:00:00"]})
-        _convert_database_output_for_datetime(df, config)
-        assert isinstance(df["timestamp"].dtype, pd.DatetimeTZDtype)
-
-    def test_tz_with_tz_aware_dtype(self):
-        config = _make_tz_config()
-        df = pd.DataFrame(
-            {
-                "timestamp": pd.to_datetime(
-                    ["2020-01-01 00:00:00+05:00", "2020-01-01 01:00:00+05:00"]
-                ),
-            }
-        )
-        _convert_database_output_for_datetime(df, config)
-        assert str(df["timestamp"].dt.tz) == "UTC"
-
-    def test_tz_with_naive_dtype(self):
-        config = _make_tz_config()
-        df = pd.DataFrame(
-            {
-                "timestamp": pd.to_datetime(["2020-01-01 00:00:00", "2020-01-01 01:00:00"]),
-            }
-        )
-        _convert_database_output_for_datetime(df, config)
-        assert isinstance(df["timestamp"].dtype, pd.DatetimeTZDtype)
-
-    def test_ntz_with_object_dtype(self):
-        config = _make_ntz_config()
-        df = pd.DataFrame({"timestamp": ["2020-01-01 00:00:00", "2020-01-01 01:00:00"]})
-        _convert_database_output_for_datetime(df, config)
-        assert pd.api.types.is_datetime64_any_dtype(df["timestamp"])
-
-    def test_missing_column_is_noop(self):
-        config = _make_tz_config()
-        df = pd.DataFrame({"other": [1, 2]})
-        _convert_database_output_for_datetime(df, config)
-        assert list(df.columns) == ["other"]
 
 
 class TestConvertSparkOutputForDatetime:

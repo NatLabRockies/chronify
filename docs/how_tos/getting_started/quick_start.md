@@ -28,8 +28,8 @@ store.ingest_tables(
         time_array_id_columns=["id"],
     )
  )
-query = "SELECT timestamp, value FROM devices WHERE id = ?"
-df = store.read_query("devices", query, params=(2,))
+query = "SELECT timestamp, value FROM devices WHERE id = 2"
+df = store.read_query(query).execute()
 df.head()
 ```
 

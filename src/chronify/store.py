@@ -695,31 +695,29 @@ class Store:
         self._schema_mgr.add_schema(dst_schema)
         return dst_schema
 
-    def read_query(
-        self,
-        name: str,
-        query: ir.Table | str,
-    ) -> pd.DataFrame:
-        """Return the query result as a pandas DataFrame.
+    def read_query(self, query: ir.Table | str) -> ir.Table:
+        """Return the query result as an Ibis Table expression.
+
+        Call ``.execute()`` on the returned expression to materialize a pandas DataFrame.
 
         Parameters
         ----------
-        name
-            Table or view name
         query
-            SQL query as a string or ibis Table expression
+            SQL query as a string or ibis Table expression.
         """
-        schema = self._schema_mgr.get_schema(name)
         if isinstance(query, str):
-            expr = self._backend.sql(query)
-        else:
-            expr = query
-        return self._backend.read_query(expr, schema.time_config)
+            return self._backend.sql(query)
+        return query
 
-    def read_table(self, name: str) -> pd.DataFrame:
-        """Return the table as a pandas DataFrame."""
-        schema = self._schema_mgr.get_schema(name)
-        return self._backend.read_table(name, schema.time_config)
+    def read_table(self, name: str) -> ir.Table:
+        """Return the table as an Ibis Table expression.
+
+        Call ``.execute()`` on the returned expression to materialize a pandas DataFrame.
+        """
+        if not self.has_table(name):
+            msg = f"{name=}"
+            raise TableNotStored(msg)
+        return self._backend.table(name)
 
     def read_raw_query(self, query: str) -> pd.DataFrame:
         """Execute a query directly on the backend and return the results as a DataFrame.

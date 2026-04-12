@@ -65,7 +65,12 @@ def test_spark_round_trip_timestamp_tz_preserves_fractional_seconds(spark_store:
     )
 
     spark_store.ingest_table(df, schema, skip_time_checks=True)
-    out = spark_store.read_table(schema.name).sort_values("timestamp").reset_index(drop=True)
+    out = (
+        spark_store.read_table(schema.name)
+        .execute()
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
 
     expected = pd.to_datetime(
         [
@@ -169,7 +174,7 @@ def test_spark_ingest_normalizes_tz_aware_to_ntz(spark_store: Store) -> None:
         }
     )
     spark_store.ingest_table(df, schema, skip_time_checks=True)
-    out = spark_store.read_table(schema.name)
+    out = spark_store.read_table(schema.name).execute()
     # Should be tz-naive after round-trip
     assert not isinstance(out["timestamp"].dtype, pd.DatetimeTZDtype)
     assert out["timestamp"].iloc[0] == pd.Timestamp("2020-01-01 00:00:00")
@@ -197,7 +202,7 @@ def test_spark_ingest_normalizes_tz_naive_to_tz(spark_store: Store) -> None:
         }
     )
     spark_store.ingest_table(df, schema, skip_time_checks=True)
-    out = spark_store.read_table(schema.name)
+    out = spark_store.read_table(schema.name).execute()
     assert isinstance(out["timestamp"].dtype, pd.DatetimeTZDtype)
     assert out["timestamp"].iloc[0] == pd.Timestamp("2020-01-01 00:00:00+00:00")
 
@@ -230,7 +235,7 @@ def test_spark_time_zone_conversion(spark_store: Store) -> None:
 
     to_tz = ZoneInfo("US/Eastern")
     dst_schema = spark_store.convert_time_zone(schema.name, to_tz)
-    out = spark_store.read_table(dst_schema.name)
+    out = spark_store.read_table(dst_schema.name).execute()
     expected = df["timestamp"].dt.tz_convert(to_tz).dt.tz_localize(None)
     out_sorted = out.sort_values("timestamp").reset_index(drop=True)
     assert list(out_sorted["timestamp"]) == list(expected)
@@ -268,7 +273,7 @@ def test_spark_delete_rows(spark_store: Store) -> None:
     spark_store.ingest_table(df, schema, skip_time_checks=True)
     count = spark_store.delete_rows(schema.name, {"id": 1})
     assert count == 2
-    out = spark_store.read_table(schema.name)
+    out = spark_store.read_table(schema.name).execute()
     assert len(out) == 2
     assert set(out["id"]) == {2}
 

@@ -14,15 +14,14 @@ from pandas import DatetimeTZDtype
 
 from chronify.exceptions import ConflictingInputsError, InvalidOperation, InvalidParameter
 from chronify.ibis.base import (
-    DatetimeRanges,
     IbisBackend,
     ObjectType,
     TimeBaseModel,
-    TimeDataType,
     _DATETIME_RANGES,
     _is_ddl,
     _normalize_timestamps,
 )
+from chronify.time import TimeDataType
 
 
 def _adapt_value(v: Any) -> Any:
@@ -230,61 +229,35 @@ class SQLiteBackend(IbisBackend):
         if not self._in_transaction:
             self._connection.con.commit()
 
-    def _post_read_normalize(self, df: pd.DataFrame, config: DatetimeRanges) -> None:
-        """SQLite stores timestamps as text; coerce back to datetime dtypes."""
-        _convert_database_output_for_datetime(df, config)
-
     def _prepare_write_data(
         self,
         data: pd.DataFrame | pa.Table,
         configs: Sequence[TimeBaseModel],
     ) -> pd.DataFrame:
-        """SQLite cannot ingest Arrow directly; convert to pandas and coerce TZ→UTC text."""
+        """SQLite stores timestamps as text, so joins compare raw strings.
+
+        Canonicalize all tz-aware columns to UTC on write so joins between columns
+        written from different source zones (e.g., source table in ``Etc/GMT+5``
+        vs. a mapping table localized from tz-naive input) align.
+        """
         if isinstance(data, pa.Table):
             data = data.to_pandas()
         data = _normalize_timestamps(data, configs)
         copied = False
         for config in configs:
-            if isinstance(config, _DATETIME_RANGES):
-                data, copied = _convert_database_input_for_datetime(data, config, copied)
+            if not isinstance(config, _DATETIME_RANGES):
+                continue
+            if config.dtype != TimeDataType.TIMESTAMP_TZ:
+                continue
+            if config.time_column not in data.columns:
+                continue
+            if not isinstance(data[config.time_column].dtype, DatetimeTZDtype):
+                continue
+            if not copied:
+                data = data.copy()
+                copied = True
+            data[config.time_column] = data[config.time_column].dt.tz_convert("UTC")
         return data
-
-
-def _convert_database_output_for_datetime(df: pd.DataFrame, config: DatetimeRanges) -> None:
-    """Convert DataFrame datetime columns after SQLite output."""
-    if config.time_column not in df.columns:
-        return
-
-    col = df[config.time_column]
-    if config.dtype == TimeDataType.TIMESTAMP_TZ:
-        if col.dtype == object:
-            df[config.time_column] = pd.to_datetime(col, utc=True)
-        elif isinstance(col.dtype, DatetimeTZDtype):
-            df[config.time_column] = col.dt.tz_convert("UTC")
-        else:
-            df[config.time_column] = col.dt.tz_localize("UTC")
-    else:
-        if col.dtype == object:
-            df[config.time_column] = pd.to_datetime(col, utc=False)
-
-
-def _convert_database_input_for_datetime(
-    df: pd.DataFrame, config: DatetimeRanges, copied: bool
-) -> tuple[pd.DataFrame, bool]:
-    """Convert DataFrame datetime columns for SQLite input (store as UTC)."""
-    if config.dtype == TimeDataType.TIMESTAMP_NTZ:
-        return df, copied
-
-    if not copied:
-        df = df.copy()
-        copied = True
-
-    if isinstance(df[config.time_column].dtype, DatetimeTZDtype):
-        df[config.time_column] = df[config.time_column].dt.tz_convert("UTC")
-    else:
-        df[config.time_column] = df[config.time_column].dt.tz_localize("UTC")
-
-    return df, copied
 
 
 def _infer_sqlite_path(connection: ibis.BaseBackend) -> str | None:
