@@ -54,6 +54,7 @@ class SQLiteBackend(IbisBackend):
             msg = f"{database=} and {connection=} cannot both be set"
             raise ConflictingInputsError(msg)
 
+        self._table_cache = None
         self._owns_connection = connection is None
         if connection is None:
             db = str(database)
@@ -89,20 +90,31 @@ class SQLiteBackend(IbisBackend):
             # SQLite CREATE TABLE AS SELECT loses datetime type info.
             # Execute the expression first, then create from the DataFrame.
             df = self._connection.execute(obj)
-            return self._connection.create_table(name, obj=df, overwrite=overwrite)
-        return self._connection.create_table(name, obj=obj, schema=schema, overwrite=overwrite)
+            table = self._connection.create_table(name, obj=df, overwrite=overwrite)
+        else:
+            table = self._connection.create_table(
+                name, obj=obj, schema=schema, overwrite=overwrite
+            )
+        self._mark_table_created(name)
+        return table
 
     def create_view(self, name: str, expr: ir.Table) -> ir.Table:
-        return self._connection.create_view(name, expr, overwrite=False)
+        view = self._connection.create_view(name, expr, overwrite=False)
+        self._mark_table_created(name)
+        return view
 
     def drop_table(self, name: str) -> None:
         self._connection.drop_table(name, force=True)
+        self._mark_table_dropped(name)
 
     def drop_view(self, name: str) -> None:
         self._connection.drop_view(name, force=True)
+        self._mark_table_dropped(name)
 
     def list_tables(self) -> list[str]:
-        return cast(list[str], self._connection.list_tables())
+        tables = cast(list[str], self._connection.list_tables())
+        self._table_cache = set(tables)
+        return tables
 
     def table(self, name: str) -> ir.Table:
         return self._connection.table(name)
@@ -162,6 +174,7 @@ class SQLiteBackend(IbisBackend):
         con = self._connection.con
         con.execute(query)
         con.commit()
+        self._invalidate_table_cache()
 
     def execute_sql_to_df(self, query: str) -> pd.DataFrame:
         logger.trace("execute_sql_to_df: {}", query)

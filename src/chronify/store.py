@@ -1,6 +1,6 @@
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, cast
 from datetime import tzinfo
 
 import duckdb
@@ -849,7 +849,7 @@ class Store:
         table = self._backend.table(name)
         predicates = [table[column] == value for column, value in time_array_id_values.items()]
         filtered = table.filter(predicates)
-        num_to_delete = int(filtered.count().execute())
+        num_to_delete = int(cast(Any, filtered.count().execute()))
 
         self._backend.delete_rows(name, time_array_id_values)
 
@@ -863,11 +863,14 @@ class Store:
             time_array_id_values,
         )
 
-        # Check if table is now empty
-        remaining = int(self._backend.table(name).count().execute())
-        if remaining == 0:
-            logger.info("Delete empty table {}", name)
-            self.drop_table(name)
+        # Avoid an additional full distributed count on Spark. Local backends keep
+        # the historical behavior of removing the table after its final row group
+        # is deleted.
+        if self._backend.name != "spark":
+            remaining = int(cast(Any, self._backend.table(name).count().execute()))
+            if remaining == 0:
+                logger.info("Delete empty table {}", name)
+                self.drop_table(name)
 
         return num_to_delete
 

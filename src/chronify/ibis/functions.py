@@ -142,15 +142,6 @@ def write_parquet(
     else:
         expr = query
 
-    if backend.name == "spark" and isinstance(config, _DATETIME_RANGES):
-        df = backend.execute(expr)
-        _convert_spark_output_for_datetime(df, config)
-        if partition_columns:
-            df.to_parquet(output_file, partition_cols=partition_columns)
-        else:
-            df.to_parquet(output_file)
-        return
-
     backend.write_parquet(expr, str(output_file), partition_by=partition_columns)
 
 

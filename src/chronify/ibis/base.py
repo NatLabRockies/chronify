@@ -19,6 +19,8 @@ class ObjectType(StrEnum):
 class IbisBackend(ABC):
     """Abstract base class defining the interface for Ibis database backends."""
 
+    _table_cache: set[str] | None
+
     @property
     @abstractmethod
     def name(self) -> str:
@@ -119,7 +121,24 @@ class IbisBackend(ABC):
 
     def has_table(self, name: str) -> bool:
         """Check whether a table or view exists."""
-        return name in self.list_tables()
+        if self._table_cache is None:
+            self._refresh_table_cache()
+        assert self._table_cache is not None
+        return name in self._table_cache
+
+    def _refresh_table_cache(self) -> None:
+        self._table_cache = set(self.list_tables())
+
+    def _mark_table_created(self, name: str) -> None:
+        if self._table_cache is not None:
+            self._table_cache.add(name)
+
+    def _mark_table_dropped(self, name: str) -> None:
+        if self._table_cache is not None:
+            self._table_cache.discard(name)
+
+    def _invalidate_table_cache(self) -> None:
+        self._table_cache = None
 
     def execute_sql(self, query: str) -> Any:
         """Execute a raw SQL statement (no result expected)."""

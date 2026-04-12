@@ -39,6 +39,7 @@ class SparkBackend(IbisBackend):
                 .getOrCreate()
             )
         self._validate_session(session)
+        self._table_cache = None
         self._session = session
         self._connection = ibis.pyspark.connect(session)
 
@@ -64,24 +65,36 @@ class SparkBackend(IbisBackend):
         if isinstance(obj, pd.DataFrame):
             obj = self._prepare_data_for_spark(obj)
         try:
-            return self._connection.create_table(name, obj=obj, schema=schema, overwrite=overwrite)
+            table = self._connection.create_table(
+                name, obj=obj, schema=schema, overwrite=overwrite
+            )
         except Exception as exc:
             if "LOCATION_ALREADY_EXISTS" not in str(exc):
                 raise
             self._remove_managed_table_location(name)
-            return self._connection.create_table(name, obj=obj, schema=schema, overwrite=overwrite)
+            table = self._connection.create_table(
+                name, obj=obj, schema=schema, overwrite=overwrite
+            )
+        self._mark_table_created(name)
+        return table
 
     def create_view(self, name: str, expr: ir.Table) -> ir.Table:
-        return self._connection.create_view(name, expr, overwrite=False)
+        view = self._connection.create_view(name, expr, overwrite=False)
+        self._mark_table_created(name)
+        return view
 
     def drop_table(self, name: str) -> None:
         self._connection.drop_table(name, force=True)
+        self._mark_table_dropped(name)
 
     def drop_view(self, name: str) -> None:
         self._connection.drop_view(name, force=True)
+        self._mark_table_dropped(name)
 
     def list_tables(self) -> list[str]:
-        return cast(list[str], self._connection.list_tables())
+        tables = cast(list[str], self._connection.list_tables())
+        self._table_cache = set(tables)
+        return tables
 
     def table(self, name: str) -> ir.Table:
         return self._connection.table(name)
@@ -123,11 +136,23 @@ class SparkBackend(IbisBackend):
         except Exception as exc:
             if "does not support DELETE" not in str(exc):
                 raise
-            df = self._connection.execute(self.table(name))
-            for column, value in values.items():
-                df = df[df[column] != value]
-            self.create_table(name, obj=df, overwrite=True)
+            self._overwrite_without_deleted_rows(name, where, args)
         logger.trace("Deleted rows from {} matching {}", name, values)
+
+    def _overwrite_without_deleted_rows(self, name: str, where: str, args: dict[str, Any]) -> None:
+        quoted_name = _quote_identifier(name)
+        tmp_name = f"__chronify_delete_{uuid.uuid4().hex}"
+        quoted_tmp = _quote_identifier(tmp_name)
+        try:
+            self._session.sql(
+                f"CREATE TABLE {quoted_tmp} AS "
+                f"SELECT * FROM {quoted_name} WHERE NOT ({where})",
+                args=args,
+            )
+            self._session.sql(f"INSERT OVERWRITE TABLE {quoted_name} SELECT * FROM {quoted_tmp}")
+        finally:
+            self._session.sql(f"DROP TABLE IF EXISTS {quoted_tmp}")
+            self._remove_managed_table_location(tmp_name)
 
     def execute(self, expr: ir.Expr) -> pd.DataFrame:
         return cast(pd.DataFrame, self._connection.execute(expr))
@@ -141,21 +166,27 @@ class SparkBackend(IbisBackend):
         path: str,
         partition_by: list[str] | None = None,
     ) -> None:
-        df = self._connection.execute(expr)
+        df = self._to_spark_dataframe(expr)
+        writer = df.write.mode("errorifexists")
         if partition_by:
-            spark_df = self._session.createDataFrame(df)
-            spark_df.write.partitionBy(*partition_by).parquet(path)
+            writer.partitionBy(*partition_by).parquet(path)
         else:
-            df.to_parquet(path)
+            writer.parquet(path)
+
+    def _to_spark_dataframe(self, expr: ir.Table) -> Any:
+        sql = self._connection.compile(expr)
+        return self._session.sql(sql)
 
     def create_view_from_parquet(self, path: str, name: str) -> tuple[ir.Table, ObjectType]:
         spark_df = self._session.read.parquet(path)
         spark_df.createOrReplaceTempView(name)
+        self._mark_table_created(name)
         return self.table(name), ObjectType.VIEW
 
     def execute_sql(self, query: str) -> None:
         logger.trace("execute_sql: {}", query)
         self._session.sql(query)
+        self._invalidate_table_cache()
 
     def execute_sql_to_df(self, query: str) -> pd.DataFrame:
         logger.trace("execute_sql_to_df: {}", query)
@@ -171,7 +202,7 @@ class SparkBackend(IbisBackend):
         raise InvalidOperation(msg)
 
     def _remove_managed_table_location(self, name: str) -> None:
-        location = self._session.conf.get("spark.sql.warehouse.dir", "spark-warehouse")
+        location = str(self._session.conf.get("spark.sql.warehouse.dir", "spark-warehouse"))
         parsed = urlparse(location)
         if parsed.scheme == "file":
             warehouse = Path(unquote(parsed.path))
