@@ -23,8 +23,8 @@ $ $SPARK_HOME/sbin/start-thriftserver.sh --master=spark://$(hostname):7077
 The URL to connect to this server is `hive://localhost:10000/default`
 
 ## Installation on an HPC
-The chronify development team uses these
-[scripts](https://github.com/NREL/HPC/tree/master/applications/spark) to run Spark on NREL's HPC.
+The chronify development team uses this
+[package](https://github.com/NatLabRockies/sparkctl) to run Spark on NLR's HPC.
 
 ## Chronify Usage
 This example creates a chronify Store with Spark as the backend and then adds a view to a Parquet

@@ -60,9 +60,9 @@ dev = [
 ]
 
 [project.urls]
-Documentation = "https://github.com/NREL/chronify#readme"
-Issues = "https://github.com/NREL/chronify/issues"
-Source = "https://github.com/NREL/chronify"
+Documentation = "https://github.com/NatLabRockies/chronify#readme"
+Issues = "https://github.com/NatLabRockies/chronify/issues"
+Source = "https://github.com/NatLabRockies/chronify"
 
 [tool.mypy]
 files = [
