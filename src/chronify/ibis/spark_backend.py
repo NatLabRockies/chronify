@@ -2,7 +2,8 @@
 
 import uuid
 import shutil
-from typing import Any, cast
+from contextlib import contextmanager
+from typing import Any, Generator, cast
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 
@@ -12,7 +13,7 @@ import pandas as pd
 from loguru import logger
 from pandas import DatetimeTZDtype
 
-from chronify.exceptions import InvalidParameter
+from chronify.exceptions import InvalidOperation, InvalidParameter
 from chronify.ibis.base import IbisBackend, ObjectType
 
 
@@ -88,20 +89,27 @@ class SparkBackend(IbisBackend):
     def insert(self, name: str, data: pd.DataFrame) -> None:
         # Spark doesn't support INSERT directly -- create a temp view and insert via SQL
         target_columns = list(self.table(name).columns)
-        data = data.reindex(columns=target_columns)
+        _validate_insert_columns(name, target_columns, list(data.columns))
+        data = data.loc[:, target_columns]
         data = self._prepare_data_for_spark(data)
         spark_df = self._session.createDataFrame(data)
-        tmp_view = f"__insert_tmp_{uuid.uuid4().hex}"
-        spark_df.createOrReplaceTempView(tmp_view)
         quoted_name = _quote_identifier(name)
         col_list = ", ".join(_quote_identifier(c) for c in target_columns)
-        try:
+        with self._temp_view(spark_df) as tmp_view:
             self._session.sql(
                 f"INSERT INTO {quoted_name} ({col_list}) SELECT {col_list} FROM {tmp_view}"
             )
+        logger.trace("Inserted {} rows into {}", len(data), name)
+
+    @contextmanager
+    def _temp_view(self, spark_df: Any) -> Generator[str, None, None]:
+        """Register ``spark_df`` as a uniquely-named temp view; drop on exit."""
+        tmp_view = f"__chronify_tmp_{uuid.uuid4().hex}"
+        spark_df.createOrReplaceTempView(tmp_view)
+        try:
+            yield tmp_view
         finally:
             self._session.catalog.dropTempView(tmp_view)
-        logger.trace("Inserted {} rows into {}", len(data), name)
 
     def delete_rows(self, name: str, values: dict[str, Any]) -> None:
         # Spark 3.4+ supports parameterized SQL via the ``args`` keyword.
@@ -154,11 +162,13 @@ class SparkBackend(IbisBackend):
         return cast(pd.DataFrame, self._session.sql(query).toPandas())
 
     def dispose(self) -> None:
+        self._connection.disconnect()
         if self._owns_session:
-            self._connection.disconnect()
+            self._session.stop()
 
-    def reconnect(self) -> None:
-        pass  # Spark sessions are long-lived
+    def backup(self, dst: str) -> None:
+        msg = "backup is not supported for the Spark backend"
+        raise InvalidOperation(msg)
 
     def _remove_managed_table_location(self, name: str) -> None:
         location = self._session.conf.get("spark.sql.warehouse.dir", "spark-warehouse")
@@ -194,6 +204,19 @@ class SparkBackend(IbisBackend):
                 f"timestamp semantics, got {time_zone!r}."
             )
             raise InvalidParameter(msg)
+
+
+def _validate_insert_columns(
+    table_name: str, target_columns: list[str], data_columns: list[str]
+) -> None:
+    missing = [c for c in target_columns if c not in data_columns]
+    extra = [c for c in data_columns if c not in target_columns]
+    if missing or extra:
+        msg = (
+            f"Insert data columns do not match table {table_name!r}. "
+            f"Missing: {missing}. Extra: {extra}."
+        )
+        raise InvalidParameter(msg)
 
 
 def _quote_identifier(identifier: str) -> str:

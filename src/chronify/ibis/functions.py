@@ -110,16 +110,20 @@ def write_table(
     _check_one_config_per_datetime_column(configs)
     df = _normalize_timestamps(df, configs)
 
-    match backend.name:
-        case "duckdb":
-            _write_to_duckdb(backend, df, table_name, if_exists)
-        case "sqlite":
-            _write_to_sqlite(backend, df, table_name, configs, if_exists)
-        case "spark":
-            _write_to_spark(backend, df, table_name, if_exists)
-        case _:
-            msg = f"Unsupported backend: {backend.name}"
-            raise NotImplementedError(msg)
+    if backend.name not in {"duckdb", "sqlite", "spark"}:
+        msg = f"Unsupported backend: {backend.name}"
+        raise NotImplementedError(msg)
+
+    if backend.name == "sqlite":
+        # SQLite-specific: ensure TZ timestamps are stored as UTC text.
+        # _normalize_timestamps already ran, so NTZ columns are tz-naive and
+        # TZ columns are tz-aware UTC. This step converts TZ to UTC for storage.
+        copied = False
+        for config in configs:
+            if isinstance(config, _DATETIME_RANGES):
+                df, copied = _convert_database_input_for_datetime(df, config, copied)
+
+    _apply_if_exists(backend, df, table_name, if_exists)
 
 
 def write_parquet(
@@ -233,54 +237,7 @@ def _convert_spark_output_for_datetime(df: pd.DataFrame, config: DatetimeRanges)
             df[config.time_column] = col.dt.tz_convert(None).astype("datetime64[us]")
 
 
-def _write_to_duckdb(
-    backend: IbisBackend,
-    df: pd.DataFrame,
-    table_name: str,
-    if_exists: str,
-) -> None:
-    match if_exists:
-        case "append":
-            backend.insert(table_name, df)
-        case "replace":
-            backend.drop_table(table_name)
-            backend.create_table(table_name, df)
-        case "fail":
-            backend.create_table(table_name, df)
-        case _:
-            msg = f"Invalid if_exists value: {if_exists}"
-            raise InvalidOperation(msg)
-
-
-def _write_to_sqlite(
-    backend: IbisBackend,
-    df: pd.DataFrame,
-    table_name: str,
-    configs: Sequence[TimeBaseModel],
-    if_exists: str,
-) -> None:
-    # SQLite-specific: ensure TZ timestamps are stored as UTC text.
-    # _normalize_timestamps already ran, so NTZ columns are tz-naive and
-    # TZ columns are tz-aware UTC. This step converts TZ to UTC for storage.
-    copied = False
-    for config in configs:
-        if isinstance(config, _DATETIME_RANGES):
-            df, copied = _convert_database_input_for_datetime(df, config, copied)
-
-    match if_exists:
-        case "append":
-            backend.insert(table_name, df)
-        case "replace":
-            backend.drop_table(table_name)
-            backend.create_table(table_name, df)
-        case "fail":
-            backend.create_table(table_name, df)
-        case _:
-            msg = f"Invalid if_exists value: {if_exists}"
-            raise InvalidOperation(msg)
-
-
-def _write_to_spark(
+def _apply_if_exists(
     backend: IbisBackend,
     df: pd.DataFrame,
     table_name: str,

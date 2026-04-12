@@ -1,5 +1,6 @@
 """DuckDB backend implementation for Ibis."""
 
+import shutil
 from pathlib import Path
 from typing import Any, cast
 
@@ -8,16 +9,46 @@ import ibis.expr.types as ir
 import pandas as pd
 from loguru import logger
 
+from chronify.exceptions import ConflictingInputsError, InvalidOperation, InvalidParameter
 from chronify.ibis.base import IbisBackend, ObjectType
 
 
 class DuckDBBackend(IbisBackend):
     """Ibis backend for DuckDB databases."""
 
-    def __init__(self, database: str | Path = ":memory:") -> None:
-        db = str(database)
-        self._database = None if db == ":memory:" else db
-        self._connection = ibis.duckdb.connect(db)
+    def __init__(
+        self,
+        database: str | Path = ":memory:",
+        connection: ibis.BaseBackend | None = None,
+    ) -> None:
+        """Construct a DuckDBBackend.
+
+        Parameters
+        ----------
+        database
+            Path to a DuckDB database file, or ``":memory:"`` for an in-memory
+            database. Ignored when ``connection`` is provided.
+        connection
+            Optional pre-existing ibis DuckDB connection. When provided, the
+            backend does not own the connection and will not disconnect it on
+            ``dispose()``. ``database`` is inferred from the connection when
+            possible; otherwise ``backup()`` is unavailable.
+        """
+        if connection is not None and str(database) != ":memory:":
+            msg = f"{database=} and {connection=} cannot both be set"
+            raise ConflictingInputsError(msg)
+
+        self._owns_connection = connection is None
+        if connection is None:
+            db = str(database)
+            self._database = None if db == ":memory:" else db
+            self._connection = ibis.duckdb.connect(db)
+        else:
+            if connection.name != "duckdb":
+                msg = f"DuckDBBackend requires a DuckDB ibis connection, got {connection.name!r}"
+                raise InvalidParameter(msg)
+            self._connection = connection
+            self._database = _infer_duckdb_path(connection)
 
     @property
     def name(self) -> str:
@@ -60,7 +91,8 @@ class DuckDBBackend(IbisBackend):
     def insert(self, name: str, data: pd.DataFrame) -> None:
         con = self._connection.con  # raw duckdb connection
         target_columns = list(self.table(name).columns)
-        ordered_data = data.reindex(columns=target_columns)
+        _validate_insert_columns(name, target_columns, list(data.columns))
+        ordered_data = data.loc[:, target_columns]
         quoted_columns = ", ".join(f'"{col}"' for col in target_columns)
         quoted_name = _quote_identifier(name)
         con.register("__insert_df", ordered_data)
@@ -93,16 +125,16 @@ class DuckDBBackend(IbisBackend):
         path: str,
         partition_by: list[str] | None = None,
     ) -> None:
+        escaped_path = path.replace("'", "''")
+        sql = self._connection.compile(expr)
         if partition_by:
             partition_clause = ", ".join(_quote_identifier(c) for c in partition_by)
-            escaped_path = path.replace("'", "''")
-            sql = self._connection.compile(expr)
             self._connection.raw_sql(
                 f"COPY ({sql}) TO '{escaped_path}' "
                 f"(FORMAT PARQUET, PARTITION_BY ({partition_clause}))"
             )
         else:
-            expr.to_parquet(path)
+            self._connection.raw_sql(f"COPY ({sql}) TO '{escaped_path}' (FORMAT PARQUET)")
 
     def create_view_from_parquet(self, path: str, name: str) -> tuple[ir.Table, ObjectType]:
         parquet_path = Path(path)
@@ -127,13 +159,49 @@ class DuckDBBackend(IbisBackend):
         return cast(pd.DataFrame, result.fetch_df())
 
     def dispose(self) -> None:
-        self._connection.disconnect()
+        if self._owns_connection:
+            self._connection.disconnect()
 
-    def reconnect(self) -> None:
-        if self._database is not None:
-            self._connection = ibis.duckdb.connect(self._database)
-        else:
-            logger.warning("Cannot reconnect to an in-memory DuckDB database.")
+    def backup(self, dst: str) -> None:
+        if self._database is None:
+            msg = "backup is only supported with a database backed by a file"
+            raise InvalidOperation(msg)
+        if not self._owns_connection:
+            msg = "backup is not supported for externally-provided DuckDB connections"
+            raise InvalidOperation(msg)
+        src = self._database
+        self._connection.disconnect()
+        try:
+            shutil.copyfile(src, dst)
+        finally:
+            self._connection = ibis.duckdb.connect(src)
+
+
+def _infer_duckdb_path(connection: ibis.BaseBackend) -> str | None:
+    """Return the database file path for an ibis DuckDB connection, or None for in-memory."""
+    try:
+        result = connection.con.execute(
+            "SELECT path FROM duckdb_databases() WHERE database_name = current_database()"
+        ).fetchone()
+    except Exception:
+        return None
+    if not result:
+        return None
+    path = result[0]
+    return None if not path else str(path)
+
+
+def _validate_insert_columns(
+    table_name: str, target_columns: list[str], data_columns: list[str]
+) -> None:
+    missing = [c for c in target_columns if c not in data_columns]
+    extra = [c for c in data_columns if c not in target_columns]
+    if missing or extra:
+        msg = (
+            f"Insert data columns do not match table {table_name!r}. "
+            f"Missing: {missing}. Extra: {extra}."
+        )
+        raise InvalidParameter(msg)
 
 
 def _quote_identifier(identifier: str) -> str:

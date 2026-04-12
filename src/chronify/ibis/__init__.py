@@ -1,5 +1,6 @@
 """Ibis backend abstraction layer for Chronify."""
 
+from chronify.exceptions import InvalidParameter
 from chronify.ibis.base import IbisBackend, ObjectType
 from chronify.ibis.duckdb_backend import DuckDBBackend
 from chronify.ibis.sqlite_backend import SQLiteBackend
@@ -40,4 +41,4 @@ def make_backend(
             return SparkBackend(**kwargs)
         case _:
             msg = f"Unsupported backend: {name}. Choose from: duckdb, sqlite, spark"
-            raise ValueError(msg)
+            raise InvalidParameter(msg)

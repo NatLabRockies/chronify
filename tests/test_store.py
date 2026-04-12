@@ -595,7 +595,7 @@ def test_create_methods(iter_backend_names, tmp_path):
 
 
 def test_invalid_backend():
-    with pytest.raises(ValueError):
+    with pytest.raises(InvalidParameter):
         Store(backend_name="hive")
 
 

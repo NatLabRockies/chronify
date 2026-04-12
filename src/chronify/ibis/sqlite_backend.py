@@ -1,5 +1,6 @@
 """SQLite backend implementation for Ibis."""
 
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -9,6 +10,7 @@ import ibis.expr.types as ir
 import pandas as pd
 from loguru import logger
 
+from chronify.exceptions import ConflictingInputsError, InvalidOperation, InvalidParameter
 from chronify.ibis.base import IbisBackend, ObjectType
 
 
@@ -31,10 +33,38 @@ def _adapt_value(v: Any) -> Any:
 class SQLiteBackend(IbisBackend):
     """Ibis backend for SQLite databases."""
 
-    def __init__(self, database: str | Path = ":memory:") -> None:
-        db = str(database)
-        self._database = None if db == ":memory:" else db
-        self._connection = ibis.sqlite.connect(db)
+    def __init__(
+        self,
+        database: str | Path = ":memory:",
+        connection: ibis.BaseBackend | None = None,
+    ) -> None:
+        """Construct a SQLiteBackend.
+
+        Parameters
+        ----------
+        database
+            Path to a SQLite database file, or ``":memory:"`` for an in-memory
+            database. Ignored when ``connection`` is provided.
+        connection
+            Optional pre-existing ibis SQLite connection. When provided, the
+            backend does not own the connection and will not disconnect it on
+            ``dispose()``.
+        """
+        if connection is not None and str(database) != ":memory:":
+            msg = f"{database=} and {connection=} cannot both be set"
+            raise ConflictingInputsError(msg)
+
+        self._owns_connection = connection is None
+        if connection is None:
+            db = str(database)
+            self._database = None if db == ":memory:" else db
+            self._connection = ibis.sqlite.connect(db)
+        else:
+            if connection.name != "sqlite":
+                msg = f"SQLiteBackend requires a SQLite ibis connection, got {connection.name!r}"
+                raise InvalidParameter(msg)
+            self._connection = connection
+            self._database = _infer_sqlite_path(connection)
 
     @property
     def name(self) -> str:
@@ -81,13 +111,14 @@ class SQLiteBackend(IbisBackend):
         # Use raw SQLite cursor for parameterized inserts
         con = self._connection.con  # raw sqlite3 connection
         table = self._connection.table(name)
-        columns = table.columns
+        columns = list(table.columns)
+        _validate_insert_columns(name, columns, list(data.columns))
         placeholders = ", ".join(["?"] * len(columns))
         col_list = ", ".join(_quote_identifier(c) for c in columns)
         quoted_name = _quote_identifier(name)
         sql = f"INSERT INTO {quoted_name} ({col_list}) VALUES ({placeholders})"
 
-        ordered = data.reindex(columns=columns)
+        ordered = data.loc[:, columns]
         rows = [tuple(_adapt_value(v) for v in row) for row in ordered.itertuples(index=False)]
         cursor = con.cursor()
         cursor.executemany(sql, rows)
@@ -141,11 +172,44 @@ class SQLiteBackend(IbisBackend):
         return pd.DataFrame(rows, columns=columns)
 
     def dispose(self) -> None:
-        self._connection.disconnect()
+        if self._owns_connection:
+            self._connection.disconnect()
 
-    def reconnect(self) -> None:
-        db = self._database if self._database else ":memory:"
-        self._connection = ibis.sqlite.connect(db)
+    def backup(self, dst: str) -> None:
+        if self._database is None:
+            msg = "backup is only supported with a database backed by a file"
+            raise InvalidOperation(msg)
+        dst_con = sqlite3.connect(dst)
+        try:
+            self._connection.con.backup(dst_con)
+        finally:
+            dst_con.close()
+
+
+def _infer_sqlite_path(connection: ibis.BaseBackend) -> str | None:
+    """Return the database file path for an ibis SQLite connection, or None for in-memory."""
+    try:
+        row = connection.con.execute("PRAGMA database_list").fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    # PRAGMA database_list returns (seq, name, file); empty string => in-memory.
+    path = row[2]
+    return None if not path else str(path)
+
+
+def _validate_insert_columns(
+    table_name: str, target_columns: list[str], data_columns: list[str]
+) -> None:
+    missing = [c for c in target_columns if c not in data_columns]
+    extra = [c for c in data_columns if c not in target_columns]
+    if missing or extra:
+        msg = (
+            f"Insert data columns do not match table {table_name!r}. "
+            f"Missing: {missing}. Extra: {extra}."
+        )
+        raise InvalidParameter(msg)
 
 
 def _quote_identifier(identifier: str) -> str:

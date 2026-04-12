@@ -1,5 +1,6 @@
 import json
 
+import ibis
 import pandas as pd
 from loguru import logger
 
@@ -25,8 +26,6 @@ class SchemaManager:
             logger.info("Initialized new database: {}", self._backend.database)
 
     def _create_schemas_table(self) -> None:
-        import ibis
-
         # Uniqueness of `name` is enforced in `add_schema` rather than via a
         # unique index, since Spark SQL does not support CREATE UNIQUE INDEX.
         schema = ibis.schema({"name": "string", "schema": "string"})

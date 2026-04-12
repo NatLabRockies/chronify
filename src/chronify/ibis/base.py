@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Generator, cast
 
 import ibis
@@ -11,7 +11,7 @@ import pandas as pd
 from loguru import logger
 
 
-class ObjectType(Enum):
+class ObjectType(StrEnum):
     TABLE = "table"
     VIEW = "view"
 
@@ -135,8 +135,13 @@ class IbisBackend(ABC):
         """Dispose of the backend connection."""
         self.connection.disconnect()
 
-    def reconnect(self) -> None:
-        """Reconnect to the database. Subclasses should override if needed."""
+    @abstractmethod
+    def backup(self, dst: str) -> None:
+        """Copy the database to a new location.
+
+        Not supported for in-memory databases or backends without persistent
+        file storage (e.g., Spark).
+        """
 
     @contextmanager
     def transaction(self) -> Generator[list[tuple[str, ObjectType]], None, None]:
