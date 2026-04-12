@@ -7,6 +7,7 @@ from typing import Any, cast
 import ibis
 import ibis.expr.types as ir
 import pandas as pd
+import pyarrow as pa
 from loguru import logger
 
 from chronify.exceptions import ConflictingInputsError, InvalidOperation, InvalidParameter
@@ -66,7 +67,7 @@ class DuckDBBackend(IbisBackend):
     def create_table(
         self,
         name: str,
-        obj: pd.DataFrame | ir.Table | None = None,
+        obj: pd.DataFrame | pa.Table | ir.Table | None = None,
         schema: ibis.Schema | None = None,
         overwrite: bool = False,
     ) -> ir.Table:
@@ -97,11 +98,11 @@ class DuckDBBackend(IbisBackend):
     def table(self, name: str) -> ir.Table:
         return self._connection.table(name)
 
-    def insert(self, name: str, data: pd.DataFrame) -> None:
+    def insert(self, name: str, data: pd.DataFrame | pa.Table) -> None:
         con = self._connection.con  # raw duckdb connection
         target_columns = list(self.table(name).columns)
-        _validate_insert_columns(name, target_columns, list(data.columns))
-        ordered_data = data.loc[:, target_columns]
+        _validate_insert_columns(name, target_columns, _get_columns(data))
+        ordered_data = _select_columns(data, target_columns)
         quoted_columns = ", ".join(f'"{col}"' for col in target_columns)
         quoted_name = _quote_identifier(name)
         con.register("__insert_df", ordered_data)
@@ -112,7 +113,7 @@ class DuckDBBackend(IbisBackend):
             )
         finally:
             con.unregister("__insert_df")
-        logger.trace("Inserted {} rows into {}", len(data), name)
+        logger.trace("Inserted {} rows into {}", _row_count(data), name)
 
     def delete_rows(self, name: str, values: dict[str, Any]) -> None:
         con = self._connection.con
@@ -193,6 +194,16 @@ class DuckDBBackend(IbisBackend):
         finally:
             self._connection = ibis.duckdb.connect(src)
 
+    def _begin_transaction(self) -> None:
+        self._connection.con.execute("BEGIN TRANSACTION")
+
+    def _commit_transaction(self) -> None:
+        self._connection.con.execute("COMMIT")
+
+    def _rollback_transaction(self) -> None:
+        self._connection.con.execute("ROLLBACK")
+        self._invalidate_table_cache()
+
 
 def _infer_duckdb_path(connection: ibis.BaseBackend) -> str | None:
     """Return the database file path for an ibis DuckDB connection, or None for in-memory."""
@@ -225,3 +236,21 @@ def _quote_identifier(identifier: str) -> str:
     """Quote a SQL identifier for DuckDB, escaping embedded double quotes."""
     escaped = identifier.replace('"', '""')
     return f'"{escaped}"'
+
+
+def _get_columns(data: pd.DataFrame | pa.Table) -> list[str]:
+    if isinstance(data, pa.Table):
+        return cast(list[str], data.column_names)
+    return list(data.columns)
+
+
+def _select_columns(data: pd.DataFrame | pa.Table, columns: list[str]) -> pd.DataFrame | pa.Table:
+    if isinstance(data, pa.Table):
+        return data.select(columns)
+    return data.loc[:, columns]
+
+
+def _row_count(data: pd.DataFrame | pa.Table) -> int:
+    if isinstance(data, pa.Table):
+        return cast(int, data.num_rows)
+    return len(data)

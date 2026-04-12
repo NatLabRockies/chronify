@@ -9,6 +9,7 @@ from typing import Any, Generator, cast
 import ibis
 import ibis.expr.types as ir
 import pandas as pd
+import pyarrow as pa
 from loguru import logger
 
 _DDL_RE = re.compile(
@@ -51,7 +52,7 @@ class IbisBackend(ABC):
     def create_table(
         self,
         name: str,
-        obj: pd.DataFrame | ir.Table | None = None,
+        obj: pd.DataFrame | pa.Table | ir.Table | None = None,
         schema: ibis.Schema | None = None,
         overwrite: bool = False,
     ) -> ir.Table:
@@ -94,7 +95,7 @@ class IbisBackend(ABC):
         """Return an ibis table expression for the named table."""
 
     @abstractmethod
-    def insert(self, name: str, data: pd.DataFrame) -> None:
+    def insert(self, name: str, data: pd.DataFrame | pa.Table) -> None:
         """Insert data into an existing table."""
 
     @abstractmethod
@@ -176,6 +177,15 @@ class IbisBackend(ABC):
         file storage (e.g., Spark).
         """
 
+    def _begin_transaction(self) -> None:
+        """Start a real database transaction, if the backend supports one."""
+
+    def _commit_transaction(self) -> None:
+        """Commit a real database transaction, if one was started."""
+
+    def _rollback_transaction(self) -> None:
+        """Roll back a real database transaction, if one was started."""
+
     @contextmanager
     def transaction(self) -> Generator[list[tuple[str, ObjectType]], None, None]:
         """Context manager for pseudo-transactions.
@@ -186,9 +196,11 @@ class IbisBackend(ABC):
         Yields a list to which callers should append (name, ObjectType) tuples.
         """
         created: list[tuple[str, ObjectType]] = []
+        self._begin_transaction()
         try:
             yield created
         except Exception:
+            self._rollback_transaction()
             for obj_name, obj_type in reversed(created):
                 try:
                     if obj_type == ObjectType.TABLE:
@@ -199,3 +211,5 @@ class IbisBackend(ABC):
                 except Exception:
                     logger.warning("Failed to roll back {} {}", obj_type.value, obj_name)
             raise
+        else:
+            self._commit_transaction()

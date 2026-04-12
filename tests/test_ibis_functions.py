@@ -195,6 +195,29 @@ class TestWriteTable:
         assert len(df) == 2
         backend.dispose()
 
+    def test_pyarrow_table_input_stays_arrow_for_duckdb(self, monkeypatch):
+        backend = make_backend("duckdb")
+        config = _make_ntz_config()
+        pa_table = pa.table(
+            {
+                "timestamp": pd.to_datetime(["2020-01-01 00:00:00", "2020-01-01 01:00:00"]),
+                "value": [1.0, 2.0],
+            }
+        )
+        seen_arrow = False
+
+        def create_table(name, obj=None, schema=None, overwrite=False):
+            nonlocal seen_arrow
+            seen_arrow = isinstance(obj, pa.Table)
+            return backend.connection.create_table(
+                name, obj=obj, schema=schema, overwrite=overwrite
+            )
+
+        monkeypatch.setattr(backend, "create_table", create_table)
+        write_table(backend, pa_table, "pa_test_arrow", [config], if_exists="fail")
+        assert seen_arrow
+        backend.dispose()
+
     def test_invalid_if_exists_duckdb(self):
         backend = make_backend("duckdb")
         config = _make_ntz_config()

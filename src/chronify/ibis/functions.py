@@ -103,18 +103,21 @@ def write_table(
     configs: Sequence[TimeBaseModel],
     if_exists: str = "append",
 ) -> None:
-    """Write a DataFrame to the database."""
-    if isinstance(df, pa.Table):
+    """Write tabular data to the database."""
+    if isinstance(df, pa.Table) and (
+        backend.name in {"sqlite", "spark"} or _arrow_needs_timestamp_normalization(df, configs)
+    ):
         df = df.to_pandas()
 
     _check_one_config_per_datetime_column(configs)
-    df = _normalize_timestamps(df, configs)
+    if isinstance(df, pd.DataFrame):
+        df = _normalize_timestamps(df, configs)
 
     if backend.name not in {"duckdb", "sqlite", "spark"}:
         msg = f"Unsupported backend: {backend.name}"
         raise NotImplementedError(msg)
 
-    if backend.name == "sqlite":
+    if backend.name == "sqlite" and isinstance(df, pd.DataFrame):
         # SQLite-specific: ensure TZ timestamps are stored as UTC text.
         # _normalize_timestamps already ran, so NTZ columns are tz-naive and
         # TZ columns are tz-aware UTC. This step converts TZ to UTC for storage.
@@ -166,6 +169,25 @@ def _check_one_config_per_datetime_column(configs: Sequence[TimeBaseModel]) -> N
     if time_col_dup:
         msg = f"More than one datetime config found for: {time_col_dup}"
         raise InvalidParameter(msg)
+
+
+def _arrow_needs_timestamp_normalization(
+    table: pa.Table,
+    configs: Sequence[TimeBaseModel],
+) -> bool:
+    fields = {field.name: field.type for field in table.schema}
+    for config in configs:
+        if not isinstance(config, _DATETIME_RANGES):
+            continue
+        arrow_type = fields.get(config.time_column)
+        if arrow_type is None or not pa.types.is_timestamp(arrow_type):
+            continue
+        timezone = arrow_type.tz
+        if config.dtype == TimeDataType.TIMESTAMP_NTZ and timezone is not None:
+            return True
+        if config.dtype == TimeDataType.TIMESTAMP_TZ and timezone is None:
+            return True
+    return False
 
 
 def _convert_database_input_for_datetime(
@@ -230,7 +252,7 @@ def _convert_spark_output_for_datetime(df: pd.DataFrame, config: DatetimeRanges)
 
 def _apply_if_exists(
     backend: IbisBackend,
-    df: pd.DataFrame,
+    df: pd.DataFrame | pa.Table,
     table_name: str,
     if_exists: str,
 ) -> None:

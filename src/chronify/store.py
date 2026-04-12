@@ -204,10 +204,12 @@ class Store:
         """Ingest data from multiple CSV files into the table specified by schema."""
         table_existed = self._backend.has_table(dst_schema.name)
         try:
-            created_table = self._ingest_from_csvs(paths, src_schema, dst_schema)
+            with self._backend.transaction():
+                created_table = self._ingest_from_csvs(paths, src_schema, dst_schema)
         except Exception:
             if not table_existed and self._backend.has_table(dst_schema.name):
                 self._backend.drop_table(dst_schema.name)
+            if not table_existed:
                 self._schema_mgr.remove_schema(dst_schema.name)
             raise
         return created_table
@@ -269,10 +271,12 @@ class Store:
         """Ingest pivoted data from multiple tables. Unpivot before ingesting."""
         table_existed = self._backend.has_table(dst_schema.name)
         try:
-            created_table = self._ingest_pivoted_tables(data, src_schema, dst_schema)
+            with self._backend.transaction():
+                created_table = self._ingest_pivoted_tables(data, src_schema, dst_schema)
         except Exception:
             if not table_existed and self._backend.has_table(dst_schema.name):
                 self._backend.drop_table(dst_schema.name)
+            if not table_existed:
                 self._schema_mgr.remove_schema(dst_schema.name)
             raise
         return created_table
@@ -352,10 +356,12 @@ class Store:
 
         table_existed = self._backend.has_table(schema.name)
         try:
-            created_table = self._ingest_tables(data, schema, **kwargs)
+            with self._backend.transaction():
+                created_table = self._ingest_tables(data, schema, **kwargs)
         except Exception:
             if not table_existed and self._backend.has_table(schema.name):
                 self._backend.drop_table(schema.name)
+            if not table_existed:
                 self._schema_mgr.remove_schema(schema.name)
             raise
         return created_table

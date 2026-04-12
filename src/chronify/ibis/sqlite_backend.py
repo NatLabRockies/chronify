@@ -8,6 +8,7 @@ from typing import Any, cast
 import ibis
 import ibis.expr.types as ir
 import pandas as pd
+import pyarrow as pa
 from loguru import logger
 
 from chronify.exceptions import ConflictingInputsError, InvalidOperation, InvalidParameter
@@ -55,6 +56,7 @@ class SQLiteBackend(IbisBackend):
             raise ConflictingInputsError(msg)
 
         self._table_cache = None
+        self._in_transaction = False
         self._owns_connection = connection is None
         if connection is None:
             db = str(database)
@@ -82,7 +84,7 @@ class SQLiteBackend(IbisBackend):
     def create_table(
         self,
         name: str,
-        obj: pd.DataFrame | ir.Table | None = None,
+        obj: pd.DataFrame | pa.Table | ir.Table | None = None,
         schema: ibis.Schema | None = None,
         overwrite: bool = False,
     ) -> ir.Table:
@@ -119,7 +121,9 @@ class SQLiteBackend(IbisBackend):
     def table(self, name: str) -> ir.Table:
         return self._connection.table(name)
 
-    def insert(self, name: str, data: pd.DataFrame) -> None:
+    def insert(self, name: str, data: pd.DataFrame | pa.Table) -> None:
+        if isinstance(data, pa.Table):
+            data = data.to_pandas()
         # Use raw SQLite cursor for parameterized inserts
         con = self._connection.con  # raw sqlite3 connection
         table = self._connection.table(name)
@@ -134,7 +138,7 @@ class SQLiteBackend(IbisBackend):
         rows = [tuple(_adapt_value(v) for v in row) for row in ordered.itertuples(index=False)]
         cursor = con.cursor()
         cursor.executemany(sql, rows)
-        con.commit()
+        self._commit_if_needed()
         logger.trace("Inserted {} rows into {}", len(data), name)
 
     def delete_rows(self, name: str, values: dict[str, Any]) -> None:
@@ -143,7 +147,7 @@ class SQLiteBackend(IbisBackend):
         where = " AND ".join(f"{_quote_identifier(c)} = ?" for c in values)
         sql = f"DELETE FROM {quoted_name} WHERE {where}"
         con.execute(sql, list(values.values()))
-        con.commit()
+        self._commit_if_needed()
         logger.trace("Deleted rows from {} matching {}", name, values)
 
     def execute(self, expr: ir.Expr) -> pd.DataFrame:
@@ -173,7 +177,7 @@ class SQLiteBackend(IbisBackend):
         logger.trace("execute_sql: {}", query)
         con = self._connection.con
         con.execute(query)
-        con.commit()
+        self._commit_if_needed()
         if _is_ddl(query):
             self._invalidate_table_cache()
 
@@ -198,6 +202,23 @@ class SQLiteBackend(IbisBackend):
             self._connection.con.backup(dst_con)
         finally:
             dst_con.close()
+
+    def _begin_transaction(self) -> None:
+        self._connection.con.execute("BEGIN")
+        self._in_transaction = True
+
+    def _commit_transaction(self) -> None:
+        self._connection.con.commit()
+        self._in_transaction = False
+
+    def _rollback_transaction(self) -> None:
+        self._connection.con.rollback()
+        self._in_transaction = False
+        self._invalidate_table_cache()
+
+    def _commit_if_needed(self) -> None:
+        if not self._in_transaction:
+            self._connection.con.commit()
 
 
 def _infer_sqlite_path(connection: ibis.BaseBackend) -> str | None:

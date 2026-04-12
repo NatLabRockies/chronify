@@ -10,6 +10,7 @@ from urllib.parse import urlparse, unquote
 import ibis
 import ibis.expr.types as ir
 import pandas as pd
+import pyarrow as pa
 from loguru import logger
 from pandas import DatetimeTZDtype
 
@@ -58,7 +59,7 @@ class SparkBackend(IbisBackend):
     def create_table(
         self,
         name: str,
-        obj: pd.DataFrame | ir.Table | None = None,
+        obj: pd.DataFrame | pa.Table | ir.Table | None = None,
         schema: ibis.Schema | None = None,
         overwrite: bool = False,
     ) -> ir.Table:
@@ -99,7 +100,9 @@ class SparkBackend(IbisBackend):
     def table(self, name: str) -> ir.Table:
         return self._connection.table(name)
 
-    def insert(self, name: str, data: pd.DataFrame) -> None:
+    def insert(self, name: str, data: pd.DataFrame | pa.Table) -> None:
+        if isinstance(data, pa.Table):
+            data = data.to_pandas()
         # Spark doesn't support INSERT directly -- create a temp view and insert via SQL
         target_columns = list(self.table(name).columns)
         _validate_insert_columns(name, target_columns, list(data.columns))
