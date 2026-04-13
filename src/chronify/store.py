@@ -182,7 +182,56 @@ class Store:
         src_schema: CsvTableSchema,
         dst_schema: TableSchema,
     ) -> bool:
-        """Ingest data from a CSV file."""
+        """Ingest data from a CSV file.
+
+        Parameters
+        ----------
+        path
+            Source data file
+        src_schema
+            Defines the schema of the source file.
+        dst_schema
+            Defines the destination table in the database.
+
+        Returns
+        -------
+        bool
+            Return True if a table was created.
+
+        Raises
+        ------
+        InvalidTable
+            Raised if the data does not match the schema.
+
+        Examples
+        --------
+        >>> resolution = timedelta(hours=1)
+        >>> time_config = DatetimeRange(
+        ...     time_column="timestamp",
+        ...     start=datetime(2020, 1, 1, 0),
+        ...     length=8784,
+        ...     resolution=timedelta(hours=1),
+        ... )
+        >>> store = Store()
+        >>> store.ingest_from_csv(
+        ...     "data.csv",
+        ...     CsvTableSchema(
+        ...         time_config=time_config,
+        ...         pivoted_dimension_name="device",
+        ...         value_columns=["device1", "device2", "device3"],
+        ...     ),
+        ...     TableSchema(
+        ...         name="devices",
+        ...         value_column="value",
+        ...         time_config=time_config,
+        ...         time_array_id_columns=["device"],
+        ...     ),
+        ... )
+
+        See Also
+        --------
+        ingest_from_csvs
+        """
         return self.ingest_from_csvs((path,), src_schema, dst_schema)
 
     def ingest_from_csvs(
@@ -191,7 +240,35 @@ class Store:
         src_schema: CsvTableSchema,
         dst_schema: TableSchema,
     ) -> bool:
-        """Ingest data from multiple CSV files into the table specified by schema."""
+        """Ingest data into the table specified by schema. If the table does not exist,
+        create it. This is faster than calling :meth:`ingest_from_csv` many times.
+        Each file is loaded into memory one at a time.
+        If any error occurs, all added data will be removed and the state of the database will
+        be the same as the original state.
+
+        Parameters
+        ----------
+        paths
+            Source data files
+        src_schema
+            Defines the schema of the source files.
+        dst_schema
+            Defines the destination table in the database.
+
+        Returns
+        -------
+        bool
+            Return True if a table was created.
+
+        Raises
+        ------
+        InvalidTable
+            Raised if the data does not match the schema.
+
+        See Also
+        --------
+        ingest_from_csv
+        """
         table_existed = self._backend.has_table(dst_schema.name)
         try:
             with self._backend.transaction():
@@ -249,7 +326,67 @@ class Store:
         src_schema: PivotedTableSchema | CsvTableSchema,
         dst_schema: TableSchema,
     ) -> bool:
-        """Ingest pivoted data into the table specified by schema."""
+        """Ingest pivoted data into the table specified by schema. If the table does not exist,
+        create it. Chronify will unpivot the data before ingesting it.
+
+        Parameters
+        ----------
+        data
+            Input data to ingest into the database.
+        src_schema
+            Defines the schema of the input data.
+        dst_schema
+            Defines the destination table in the database.
+
+        Returns
+        -------
+        bool
+            Return True if a table was created.
+
+        Raises
+        ------
+        InvalidTable
+            Raised if the data does not match the schema.
+
+        Examples
+        --------
+        >>> resolution = timedelta(hours=1)
+        >>> df = pd.DataFrame(
+        ...     {
+        ...         "timestamp": pd.date_range(
+        ...             "2020-01-01", "2020-12-31 23:00:00", freq=resolution
+        ...         ),
+        ...         "device1": np.random.random(8784),
+        ...         "device2": np.random.random(8784),
+        ...         "device3": np.random.random(8784),
+        ...     }
+        ... )
+        >>> time_config = DatetimeRange(
+        ...     time_column="timestamp",
+        ...     start=datetime(2020, 1, 1, 0),
+        ...     length=8784,
+        ...     resolution=timedelta(hours=1),
+        ... )
+        >>> store = Store()
+        >>> store.ingest_pivoted_table(
+        ...     df,
+        ...     PivotedTableSchema(
+        ...         time_config=time_config,
+        ...         pivoted_dimension_name="device",
+        ...         value_columns=["device1", "device2", "device3"],
+        ...     ),
+        ...     TableSchema(
+        ...         name="devices",
+        ...         value_column="value",
+        ...         time_config=time_config,
+        ...         time_array_id_columns=["device"],
+        ...     ),
+        ... )
+
+        See Also
+        --------
+        ingest_pivoted_tables
+        """
         return self.ingest_pivoted_tables((data,), src_schema, dst_schema)
 
     def ingest_pivoted_tables(
@@ -258,7 +395,31 @@ class Store:
         src_schema: PivotedTableSchema | CsvTableSchema,
         dst_schema: TableSchema,
     ) -> bool:
-        """Ingest pivoted data from multiple tables. Unpivot before ingesting."""
+        """Ingest pivoted data into the table specified by schema.
+
+        If the table does not exist, create it. Unpivot the data before ingesting it.
+        This is faster than calling :meth:`ingest_pivoted_table` many times.
+        If any error occurs, all added data will be removed and the state of the database will
+        be the same as the original state.
+
+        Parameters
+        ----------
+        data
+            Data to ingest into the database.
+        src_schema
+            Defines the schema of all input tables.
+        dst_schema
+            Defines the destination table in the database.
+
+        Returns
+        -------
+        bool
+            Return True if a table was created.
+
+        See Also
+        --------
+        ingest_pivoted_table
+        """
         table_existed = self._backend.has_table(dst_schema.name)
         try:
             with self._backend.transaction():
@@ -324,6 +485,38 @@ class Store:
         ------
         InvalidTable
             Raised if the data does not match the schema.
+
+        Examples
+        --------
+        >>> store = Store()
+        >>> resolution = timedelta(hours=1)
+        >>> df = pd.DataFrame(
+        ...     {
+        ...         "timestamp": pd.date_range(
+        ...             "2020-01-01", "2020-12-31 23:00:00", freq=resolution
+        ...         ),
+        ...         "value": np.random.random(8784),
+        ...     }
+        ... )
+        >>> df["id"] = 1
+        >>> store.ingest_table(
+        ...     df,
+        ...     TableSchema(
+        ...         name="devices",
+        ...         value_column="value",
+        ...         time_config=DatetimeRange(
+        ...             time_column="timestamp",
+        ...             start=datetime(2020, 1, 1, 0),
+        ...             length=8784,
+        ...             resolution=timedelta(hours=1),
+        ...         ),
+        ...         time_array_id_columns=["id"],
+        ...     ),
+        ... )
+
+        See Also
+        --------
+        ingest_tables
         """
         return self.ingest_tables((data,), schema, **kwargs)
 
@@ -333,7 +526,32 @@ class Store:
         schema: TableSchema,
         **kwargs: Any,
     ) -> bool:
-        """Ingest multiple input tables to the same database table."""
+        """Ingest multiple input tables to the same database table.
+        All tables must have the same schema.
+        This offers significant performance advantages over calling :meth:`ingest_table` many
+        times.
+
+        Parameters
+        ----------
+        data
+            Input tables to ingest into one database table.
+        schema
+            Defines the destination table.
+
+        Returns
+        -------
+        bool
+            Return True if a table was created.
+
+        Raises
+        ------
+        InvalidTable
+            Raised if the data does not match the schema.
+
+        See Also
+        --------
+        ingest_table
+        """
         created_table = False
         if not data:
             return created_table
@@ -389,7 +607,73 @@ class Store:
         check_mapped_timestamps: bool = False,
     ) -> None:
         """Map the existing table represented by src_name to a new table represented by
-        dst_schema with a different time configuration."""
+        dst_schema with a different time configuration.
+
+        Parameters
+        ----------
+        src_name
+            Refers to the table name of the source data.
+        dst_schema
+            Defines the table to create in the database. Must not already exist.
+        data_adjustment
+            Defines how the dataframe may need to be adjusted with respect to time.
+            Data is only adjusted when the conditions apply.
+        wrap_time_allowed
+            Defines whether the time column is allowed to be wrapped according to the time
+            config in dst_schema when it does not line up with the time config
+        output_file
+            If set, write the mapped table to this Parquet file.
+        check_mapped_timestamps
+            Perform time checks on the result of the mapping operation. This can be slow and
+            is not required.
+
+        Raises
+        ------
+        InvalidTable
+            Raised if the schemas are incompatible.
+        TableAlreadyExists
+            Raised if the dst_schema name already exists.
+
+        Examples
+        --------
+        >>> store = Store()
+        >>> hours_per_year = 12 * 7 * 24
+        >>> num_time_arrays = 3
+        >>> df = pd.DataFrame(
+        ...     {
+        ...         "id": np.concatenate(
+        ...             [np.repeat(i, hours_per_year) for i in range(1, 1 + num_time_arrays)]
+        ...         ),
+        ...         "month": np.tile(np.repeat(range(1, 13), 7 * 24), num_time_arrays),
+        ...         "day_of_week": np.tile(np.tile(np.repeat(range(7), 24), 12), num_time_arrays),
+        ...         "hour": np.tile(np.tile(range(24), 12 * 7), num_time_arrays),
+        ...         "value": np.random.random(hours_per_year * num_time_arrays),
+        ...     }
+        ... )
+        >>> schema = TableSchema(
+        ...     name="devices_by_representative_time",
+        ...     value_column="value",
+        ...     time_config=RepresentativePeriodTimeNTZ(
+        ...         time_format=RepresentativePeriodFormat.ONE_WEEK_PER_MONTH_BY_HOUR,
+        ...     ),
+        ...     time_array_id_columns=["id"],
+        ... )
+        >>> store.ingest_table(df, schema)
+        >>> store.map_table_time_config(
+        ...     "devices_by_representative_time",
+        ...     TableSchema(
+        ...         name="devices_by_datetime",
+        ...         value_column="value",
+        ...         time_config=DatetimeRange(
+        ...             time_column="timestamp",
+        ...             start=datetime(2020, 1, 1, 0),
+        ...             length=8784,
+        ...             resolution=timedelta(hours=1),
+        ...         ),
+        ...         time_array_id_columns=["id"],
+        ...     ),
+        ... )
+        """
         if self.has_table(dst_schema.name):
             msg = dst_schema.name
             raise TableAlreadyExists(msg)
@@ -413,7 +697,60 @@ class Store:
         output_file: Optional[Path] = None,
         check_mapped_timestamps: bool = False,
     ) -> TableSchema:
-        """Convert the time zone of the existing table represented by src_name to a new time zone."""
+        """Convert the time zone of the existing table represented by src_name to a new time zone.
+
+        Parameters
+        ----------
+        src_name
+            Refers to the table name of the source data.
+        time_zone
+            Time zone to convert to.
+        output_file
+            If set, write the mapped table to this Parquet file.
+        check_mapped_timestamps
+            Perform time checks on the result of the mapping operation. This can be slow and
+            is not required.
+
+        Raises
+        ------
+        TableAlreadyExists
+            Raised if the dst_schema name already exists.
+
+        Examples
+        --------
+        >>> store = Store()
+        >>> start = datetime(year=2018, month=1, day=1, tzinfo=ZoneInfo("Etc/GMT+5"))
+        >>> freq = timedelta(hours=1)
+        >>> hours_per_year = 8760
+        >>> num_time_arrays = 1
+        >>> df = pd.DataFrame(
+        ...     {
+        ...         "id": np.concatenate(
+        ...             [np.repeat(i, hours_per_year) for i in range(1, 1 + num_time_arrays)]
+        ...         ),
+        ...         "timestamp": np.tile(
+        ...             pd.date_range(start, periods=hours_per_year, freq="h"), num_time_arrays
+        ...         ),
+        ...         "value": np.random.random(hours_per_year * num_time_arrays),
+        ...     }
+        ... )
+        >>> schema = TableSchema(
+        ...     name="some_data",
+        ...     time_config=DatetimeRange(
+        ...         time_column="timestamp",
+        ...         start=start,
+        ...         length=hours_per_year,
+        ...         resolution=freq,
+        ...     ),
+        ...     time_array_id_columns=["id"],
+        ...     value_column="value",
+        ... )
+        >>> store.ingest_table(df, schema)
+        >>> to_time_zone = ZoneInfo("US/Mountain")
+        >>> dst_schema = store.convert_time_zone(
+        ...     schema.name, to_time_zone, check_mapped_timestamps=True
+        ... )
+        """
         src_schema = self._schema_mgr.get_schema(src_name)
         tzc = TimeZoneConverter(self._backend, src_schema, time_zone)
 

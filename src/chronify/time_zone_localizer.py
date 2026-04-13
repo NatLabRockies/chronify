@@ -96,7 +96,14 @@ class TimeZoneLocalizerBase(abc.ABC):
 
 
 class TimeZoneLocalizer(TimeZoneLocalizerBase):
-    """Localize tz-naive timestamps to a specified standard time zone."""
+    """Class for time zone localization of tz-naive time series data to a specified time zone.
+
+    Input data table must contain tz-naive timestamps.
+    Input time config must be of type DatetimeRange with Timestamp_NTZ dtype and tz-naive start time.
+    to_time_zone must be a standard time zone (without DST) or None.
+    Output data table will contain tz-aware timestamps.
+    Output time config will be of type DatetimeRange with Timestamp_TZ dtype and tz-aware start time.
+    """
 
     def __init__(
         self,
@@ -188,7 +195,30 @@ class TimeZoneLocalizer(TimeZoneLocalizerBase):
 
 
 class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
-    """Localize tz-naive timestamps to multiple time zones specified by a column."""
+    """Class for time zone localization of tz-naive time series data based on a time zone column.
+
+    Input data table must contain tz-naive timestamps and a time zone column.
+    Time zones in the time zone column must be standard time zones (without DST).
+    Input time config must be of type DatetimeRangeWithTZColumn or DatetimeRange with Timestamp_NTZ dtype.
+     - If DatetimeRangeWithTZColumn is used, time_zone_column, if provided, is ignored.
+     - If DatetimeRange is used, time_zone_column must be provided. It is then converted to
+       DatetimeRangeWithTZColumn internally.
+    Output data table will contain tz-aware timestamps and the original time zone column.
+    Output time config can be of type DatetimeRange or DatetimeRangeWithTZColumn with Timestamp_TZ dtype (see scenarios).
+
+    I/O Time config scenarios:
+    --------------------------------
+    To localize tz-naive timestamps aligned_in_local_standard_time to multiple time zones specified in a column:
+     - Input time config: DatetimeRangeWithTZColumn with tz-naive start time, Timestamp_NTZ dtype
+     - Output time config: DatetimeRangeWithTZColumn with tz-naive start time, Timestamp_TZ dtype
+
+    To localize tz-naive timestamps aligned_in_absolute_time to multiple time zones specified in a column:
+     - Input time config: DatetimeRangeWithTZColumn with tz-aware start time, Timestamp_NTZ dtype
+     - Output time config: DatetimeRange with tz-aware start time, Timestamp_TZ dtype
+     Note: output time config is reduced to DatetimeRange (from DatetimeRangeWithTZColumn)
+     since all timestamps are tz-aware and aligned in absolute time.
+    --------------------------------
+    """
 
     time_zone_column: str
 

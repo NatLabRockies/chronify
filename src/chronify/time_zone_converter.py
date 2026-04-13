@@ -110,7 +110,17 @@ class TimeZoneConverterBase(abc.ABC):
 
 
 class TimeZoneConverter(TimeZoneConverterBase):
-    """Convert tz-aware timestamps to a specified time zone (tz-naive output)."""
+    """Class for time zone conversion of tz-aware, aligned_in_absolute_time
+    time series data to a specified time zone.
+
+    Input data table must contain tz-aware timestamps.
+    Input time config must be of type DatetimeRange with Timestamp_TZ dtype and tz-aware start time.
+    Output data table will contain tz-naive timestamps with time zone recorded in a column
+    Output time config will be of type DatetimeRange with Timestamp_NTZ dtype and tz-naive start time.
+
+    # TODO: support DatetimeRangeWithTZColumn as input time config - Issue #64
+    # TODO: support wrap_time_allowed option - Issue #64
+    """
 
     def __init__(
         self,
@@ -207,7 +217,34 @@ class TimeZoneConverter(TimeZoneConverterBase):
 
 
 class TimeZoneConverterByColumn(TimeZoneConverterBase):
-    """Convert tz-aware timestamps to multiple time zones specified by a column."""
+    """Class for time zone conversion of tz-aware, aligned_in_absolute_time
+    time series data based on a time zone column.
+
+    Input data table must contain tz-aware timestamps and a time zone column.
+    Input time config must be of type DatetimeRangeWithTZColumn or DatetimeRange with Timestamp_TZ dtype.
+     - If DatetimeRange is used, time_zone_column must be provided.
+     - If DatetimeRangeWithTZColumn is used, it is converted to DatetimeRange internally.
+     time_zone_column, if provided, is ignored and instead taken from the time_config.
+    Output data table will contain tz-naive timestamps and the original time zone column.
+    Output time config will be of type DatetimeRangeWithTZColumn with Timestamp_NTZ dtype (see scenarios).
+
+    I/O Time config scenarios:
+    --------------------------------
+    To convert tz-aware timestamps aligned_in_absolute_time to multiple time zones specified in a column:
+     - wrap_time_allowed = False
+     - Input time config: DatetimeRange with tz-aware start time, Timestamp_TZ dtype
+     - Output time config: DatetimeRangeWithTZColumn with tz-aware start time, Timestamp_NTZ dtype
+
+    To convert tz-aware timestamps aligned_in_absolute_time to multiple time zones specified in a column
+    and aligned_in_local_standard_time:
+     - wrap_time_allowed = True
+     - Input time config: DatetimeRange with tz-aware start time, Timestamp_TZ dtype
+     - Output time config: DatetimeRangeWithTZColumn with tz-naive start time, Timestamp_NTZ dtype
+     Note: converted time is wrapped within the local time range of the original timestamps.
+    --------------------------------
+
+    # TODO: support DatetimeRangeWithTZColumn as input time config - Issue #64
+    """
 
     def __init__(
         self,
