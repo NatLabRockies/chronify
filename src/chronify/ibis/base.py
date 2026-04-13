@@ -184,15 +184,15 @@ class IbisBackend(ABC):
         """Check whether a table or view exists."""
         return name in self.list_tables()
 
-    def execute_sql(self, query: str) -> Any:
+    def execute_sql(self, query: str) -> None:
         """Execute a raw SQL statement (no result expected)."""
         logger.trace("execute_sql: {}", query)
-        return self.connection.raw_sql(query)
+        self.connection.raw_sql(query)
 
     def execute_sql_to_df(self, query: str) -> pd.DataFrame:
         """Execute a raw SQL query and return a DataFrame."""
         logger.trace("execute_sql_to_df: {}", query)
-        return cast(pd.DataFrame, self.connection.raw_sql(query).fetch_df())
+        return cast(pd.DataFrame, self.sql(query).execute())
 
     def read_query(self, expr: ir.Table, config: TimeBaseModel) -> pd.DataFrame:
         """Execute an Ibis expression and return a normalized pandas DataFrame."""

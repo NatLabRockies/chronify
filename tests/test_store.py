@@ -12,7 +12,6 @@ import pandas as pd
 import pytest
 
 from chronify.csv_io import read_csv
-from chronify.duckdb.functions import unpivot
 from chronify.exceptions import (
     ConflictingInputsError,
     InvalidOperation,
@@ -212,11 +211,13 @@ def test_ingest_multiple_tables_error(iter_stores_by_engine: Store, multiple_tab
 
 @pytest.mark.parametrize("use_pandas", [False, True])
 def test_ingest_pivoted_table(iter_stores_by_engine: Store, generators_schema, use_pandas: bool):
+    import ibis
+
     store = iter_stores_by_engine
     src_file, src_schema, dst_schema = generators_schema
     pivoted_schema = PivotedTableSchema(**src_schema.model_dump(exclude={"column_dtypes"}))
-    rel = read_csv(src_file, src_schema)
-    input_table = rel.to_df() if use_pandas else rel
+    df = read_csv(src_file, src_schema).to_df()
+    input_table = df if use_pandas else ibis.memtable(df)
     store.ingest_pivoted_table(input_table, pivoted_schema, dst_schema)
     table = store.get_table(dst_schema.name)
     stmt = table.filter(table.generator == "gen1")
@@ -307,10 +308,15 @@ def test_load_parquet(iter_stores_by_engine_no_data_ingestion: Store, tmp_path):
         time_array_id_columns=["generator"],
         value_column="value",
     )
-    rel = read_csv(GENERATOR_TIME_SERIES_FILE, src_schema)
-    rel2 = unpivot(rel, ("gen1", "gen2", "gen3"), "generator", "value")  # noqa: F841
+    df = read_csv(GENERATOR_TIME_SERIES_FILE, src_schema).to_df()
+    df2 = df.melt(
+        id_vars=["timestamp"],
+        value_vars=["gen1", "gen2", "gen3"],
+        var_name="generator",
+        value_name="value",
+    )
     out_file = tmp_path / "gen2.parquet"
-    rel2.to_parquet(str(out_file))
+    df2.to_parquet(str(out_file))
     store.create_view_from_parquet(out_file, dst_schema)
     df = store.read_table(dst_schema.name).execute()
     assert len(df) == 8784 * 3
@@ -431,8 +437,13 @@ def test_map_datetime_to_datetime(
         time_array_id_columns=["generator"],
         value_column="value",
     )
-    rel = read_csv(GENERATOR_TIME_SERIES_FILE, src_csv_schema)
-    rel2 = unpivot(rel, ("gen1", "gen2", "gen3"), "generator", "value")  # noqa: F841
+    df = read_csv(GENERATOR_TIME_SERIES_FILE, src_csv_schema).to_df()
+    df2 = df.melt(
+        id_vars=["timestamp"],
+        value_vars=["gen1", "gen2", "gen3"],
+        var_name="generator",
+        value_name="value",
+    )
 
     src_schema = TableSchema(
         name="generators_pb",
@@ -440,7 +451,7 @@ def test_map_datetime_to_datetime(
         time_array_id_columns=["generator"],
         value_column="value",
     )
-    store.ingest_table(rel2, src_schema)
+    store.ingest_table(df2, src_schema)
 
     if tzinfo is None and store.backend.name != "sqlite":
         output_file = tmp_path / "mapped_data"
@@ -750,8 +761,13 @@ def test_convert_time_zone(
         pivoted_dimension_name="generator",
         time_array_id_columns=[],
     )
-    rel = read_csv(GENERATOR_TIME_SERIES_FILE, src_csv_schema)
-    rel2 = unpivot(rel, ("gen1", "gen2", "gen3"), "generator", "value")  # noqa: F841
+    df = read_csv(GENERATOR_TIME_SERIES_FILE, src_csv_schema).to_df()
+    df2 = df.melt(
+        id_vars=["timestamp"],
+        value_vars=["gen1", "gen2", "gen3"],
+        var_name="generator",
+        value_name="value",
+    )
 
     src_schema = TableSchema(
         name="generators_pb",
@@ -759,7 +775,7 @@ def test_convert_time_zone(
         time_array_id_columns=["generator"],
         value_column="value",
     )
-    store.ingest_table(rel2, src_schema)
+    store.ingest_table(df2, src_schema)
 
     if tzinfo is None and store.backend.name != "sqlite":
         output_file = tmp_path / "mapped_data"
@@ -817,13 +833,16 @@ def test_convert_time_zone_by_column(
         pivoted_dimension_name="generator",
         time_array_id_columns=[],
     )
-    rel = read_csv(GENERATOR_TIME_SERIES_FILE, src_csv_schema)
-    rel2 = unpivot(rel, ("gen1", "gen2", "gen3"), "generator", "value")  # noqa: F841
-    # add time_zone column
-    stmt = ", ".join(rel2.columns)
-    tz_col_stmt = "CASE WHEN generator='gen1' THEN 'US/Eastern' WHEN generator='gen2' THEN 'US/Central' ELSE 'None' END AS time_zone"
-    stmt += f", {tz_col_stmt}"
-    rel2 = rel2.project(stmt)
+    df = read_csv(GENERATOR_TIME_SERIES_FILE, src_csv_schema).to_df()
+    df2 = df.melt(
+        id_vars=["timestamp"],
+        value_vars=["gen1", "gen2", "gen3"],
+        var_name="generator",
+        value_name="value",
+    )
+    df2["time_zone"] = (
+        df2["generator"].map({"gen1": "US/Eastern", "gen2": "US/Central"}).fillna("None")
+    )
 
     src_schema = TableSchema(
         name="generators_pb",
@@ -831,7 +850,7 @@ def test_convert_time_zone_by_column(
         time_array_id_columns=["generator", "time_zone"],
         value_column="value",
     )
-    store.ingest_table(rel2, src_schema)
+    store.ingest_table(df2, src_schema)
 
     if tzinfo is None and store.backend.name != "sqlite":
         output_file = tmp_path / "mapped_data"
@@ -896,8 +915,13 @@ def test_localize_time_zone(
         pivoted_dimension_name="generator",
         time_array_id_columns=[],
     )
-    rel = read_csv(GENERATOR_TIME_SERIES_FILE, src_csv_schema)
-    rel2 = unpivot(rel, ("gen1", "gen2", "gen3"), "generator", "value")  # noqa: F841
+    df = read_csv(GENERATOR_TIME_SERIES_FILE, src_csv_schema).to_df()
+    df2 = df.melt(
+        id_vars=["timestamp"],
+        value_vars=["gen1", "gen2", "gen3"],
+        var_name="generator",
+        value_name="value",
+    )
 
     src_schema = TableSchema(
         name="generators_pb",
@@ -905,7 +929,7 @@ def test_localize_time_zone(
         time_array_id_columns=["generator"],
         value_column="value",
     )
-    store.ingest_table(rel2, src_schema)
+    store.ingest_table(df2, src_schema)
 
     if to_time_zone is None and store.backend.name != "sqlite":
         output_file = tmp_path / "mapped_data"
@@ -965,13 +989,16 @@ def test_localize_time_zone_by_column(tmp_path, iter_stores_by_engine_no_data_in
         pivoted_dimension_name="generator",
         time_array_id_columns=[],
     )
-    rel = read_csv(GENERATOR_TIME_SERIES_FILE, src_csv_schema)
-    rel2 = unpivot(rel, ("gen1", "gen2", "gen3"), "generator", "value")  # noqa: F841
-    # add time_zone column with standard time zones (not DST)
-    stmt = ", ".join(rel2.columns)
-    tz_col_stmt = "CASE WHEN generator='gen1' THEN 'Etc/GMT+5' WHEN generator='gen2' THEN 'Etc/GMT+6' ELSE 'Etc/GMT+7' END AS time_zone"
-    stmt += f", {tz_col_stmt}"
-    rel2 = rel2.project(stmt)
+    df = read_csv(GENERATOR_TIME_SERIES_FILE, src_csv_schema).to_df()
+    df2 = df.melt(
+        id_vars=["timestamp"],
+        value_vars=["gen1", "gen2", "gen3"],
+        var_name="generator",
+        value_name="value",
+    )
+    df2["time_zone"] = (
+        df2["generator"].map({"gen1": "Etc/GMT+5", "gen2": "Etc/GMT+6"}).fillna("Etc/GMT+7")
+    )
 
     src_schema = TableSchema(
         name="generators_pb",
@@ -979,7 +1006,7 @@ def test_localize_time_zone_by_column(tmp_path, iter_stores_by_engine_no_data_in
         time_array_id_columns=["generator", "time_zone"],
         value_column="value",
     )
-    store.ingest_table(rel2, src_schema)
+    store.ingest_table(df2, src_schema)
 
     if store.backend.name != "sqlite":
         output_file = tmp_path / "mapped_data"

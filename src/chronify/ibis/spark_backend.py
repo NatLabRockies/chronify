@@ -3,7 +3,7 @@
 import uuid
 import shutil
 from contextlib import contextmanager
-from typing import Any, Generator, Sequence, cast
+from typing import Any, Generator, Sequence
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 
@@ -155,10 +155,6 @@ class SparkBackend(IbisBackend):
     def execute_sql(self, query: str) -> None:
         logger.trace("execute_sql: {}", query)
         self._session.sql(query)
-
-    def execute_sql_to_df(self, query: str) -> pd.DataFrame:
-        logger.trace("execute_sql_to_df: {}", query)
-        return cast(pd.DataFrame, self._session.sql(query).toPandas())
 
     def dispose(self) -> None:
         self._connection.disconnect()

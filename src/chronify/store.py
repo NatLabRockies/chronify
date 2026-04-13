@@ -3,13 +3,11 @@ from pathlib import Path
 from typing import Any, Optional, cast
 from datetime import tzinfo
 
-import duckdb
+import ibis
 import ibis.expr.types as ir
 import pandas as pd
-from duckdb import DuckDBPyRelation
 from loguru import logger
 
-import chronify.duckdb.functions as ddbf
 from chronify.exceptions import (
     ConflictingInputsError,
     InvalidParameter,
@@ -229,9 +227,9 @@ class Store:
         src_schema: CsvTableSchema,
         dst_schema: TableSchema,
     ) -> bool:
-        rel = read_csv(path, src_schema)
+        df = read_csv(path, src_schema).to_df()
         columns = set(src_schema.list_columns())
-        check_columns(rel.columns, columns)
+        check_columns(df.columns, columns)
 
         if isinstance(src_schema.time_config, IndexTimeRangeBase):
             if isinstance(dst_schema.time_config, DatetimeRange):
@@ -242,13 +240,13 @@ class Store:
                 raise NotImplementedError(msg)
 
         if src_schema.pivoted_dimension_name is not None:
-            return self._ingest_pivoted_table(rel, src_schema, dst_schema)
+            return self._ingest_pivoted_table(df, src_schema, dst_schema)
 
-        return self._ingest_table(rel, dst_schema)
+        return self._ingest_table(df, dst_schema)
 
     def ingest_pivoted_table(
         self,
-        data: pd.DataFrame | DuckDBPyRelation,
+        data: pd.DataFrame | ir.Table,
         src_schema: PivotedTableSchema | CsvTableSchema,
         dst_schema: TableSchema,
     ) -> bool:
@@ -257,7 +255,7 @@ class Store:
 
     def ingest_pivoted_tables(
         self,
-        data: Iterable[pd.DataFrame | DuckDBPyRelation],
+        data: Iterable[pd.DataFrame | ir.Table],
         src_schema: PivotedTableSchema | CsvTableSchema,
         dst_schema: TableSchema,
     ) -> bool:
@@ -276,7 +274,7 @@ class Store:
 
     def _ingest_pivoted_tables(
         self,
-        data: Iterable[pd.DataFrame | DuckDBPyRelation],
+        data: Iterable[pd.DataFrame | ir.Table],
         src_schema: PivotedTableSchema | CsvTableSchema,
         dst_schema: TableSchema,
     ) -> bool:
@@ -289,28 +287,22 @@ class Store:
 
     def _ingest_pivoted_table(
         self,
-        data: pd.DataFrame | DuckDBPyRelation,
+        data: pd.DataFrame | ir.Table,
         src_schema: PivotedTableSchema | CsvTableSchema,
         dst_schema: TableSchema,
     ) -> bool:
-        if isinstance(data, pd.DataFrame):
-            tmp_df = data  # noqa: F841
-            rel = duckdb.sql("SELECT * from tmp_df")
-        else:
-            rel = data
-
         assert src_schema.pivoted_dimension_name is not None
-        rel2 = ddbf.unpivot(
-            rel,
-            src_schema.value_columns,
-            src_schema.pivoted_dimension_name,
-            dst_schema.value_column,
+        expr = data if isinstance(data, ir.Table) else ibis.memtable(data)
+        unpivoted = expr.pivot_longer(
+            list(src_schema.value_columns),
+            names_to=src_schema.pivoted_dimension_name,
+            values_to=dst_schema.value_column,
         )
-        return self._ingest_table(rel2, dst_schema)
+        return self._ingest_table(unpivoted, dst_schema)
 
     def ingest_table(
         self,
-        data: pd.DataFrame | DuckDBPyRelation,
+        data: pd.DataFrame | ir.Table,
         schema: TableSchema,
         **kwargs: Any,
     ) -> bool:
@@ -338,7 +330,7 @@ class Store:
 
     def ingest_tables(
         self,
-        data: Iterable[pd.DataFrame | DuckDBPyRelation],
+        data: Iterable[pd.DataFrame | ir.Table],
         schema: TableSchema,
         **kwargs: Any,
     ) -> bool:
@@ -361,7 +353,7 @@ class Store:
 
     def _ingest_tables(
         self,
-        data: Iterable[pd.DataFrame | DuckDBPyRelation],
+        data: Iterable[pd.DataFrame | ir.Table],
         schema: TableSchema,
         skip_time_checks: bool = False,
     ) -> bool:
@@ -375,10 +367,10 @@ class Store:
 
     def _ingest_table(
         self,
-        data: pd.DataFrame | DuckDBPyRelation,
+        data: pd.DataFrame | ir.Table,
         schema: TableSchema,
     ) -> bool:
-        df = data.to_df() if isinstance(data, DuckDBPyRelation) else data
+        df = data.execute() if isinstance(data, ir.Table) else data
         check_columns(df.columns, schema.list_columns())
 
         if not self._backend.has_table(schema.name):
@@ -720,11 +712,11 @@ class Store:
         return self._backend.table(name)
 
     def read_raw_query(self, query: str) -> pd.DataFrame:
-        """Execute a query directly on the backend and return the results as a DataFrame.
+        """Execute a raw SQL query on the backend and return the results as a DataFrame.
 
-        Note: Unlike :meth:`read_query`, no conversion of timestamps is performed.
-        Timestamps will be in the format of the underlying database. SQLite backends will return
-        strings instead of datetime.
+        This is an escape hatch for executing backend-specific SQL that Ibis cannot
+        express. For portable queries, prefer :meth:`read_query`, which returns an
+        Ibis Table expression with consistent cross-backend typing.
 
         Parameters
         ----------

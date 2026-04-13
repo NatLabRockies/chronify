@@ -142,14 +142,6 @@ class SQLiteBackend(IbisBackend):
         con.execute(query)
         self._commit_if_needed()
 
-    def execute_sql_to_df(self, query: str) -> pd.DataFrame:
-        logger.trace("execute_sql_to_df: {}", query)
-        con = self._connection.con
-        cursor = con.execute(query)
-        rows = cursor.fetchall()
-        columns = [desc[0] for desc in cursor.description] if cursor.description else []
-        return pd.DataFrame(rows, columns=columns)
-
     def dispose(self) -> None:
         if self._owns_connection:
             self._connection.disconnect()

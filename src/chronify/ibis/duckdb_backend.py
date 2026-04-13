@@ -125,11 +125,6 @@ class DuckDBBackend(IbisBackend):
         )
         return self.table(name), ObjectType.VIEW
 
-    def execute_sql_to_df(self, query: str) -> pd.DataFrame:
-        logger.trace("execute_sql_to_df: {}", query)
-        result = self._connection.raw_sql(query)
-        return cast(pd.DataFrame, result.fetch_df())
-
     def dispose(self) -> None:
         if self._owns_connection:
             self._connection.disconnect()
