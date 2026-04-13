@@ -142,16 +142,10 @@ class SparkBackend(IbisBackend):
         path: str,
         partition_by: list[str] | None = None,
     ) -> None:
-        df = self._to_spark_dataframe(expr)
-        writer = df.write.mode("errorifexists")
         if partition_by:
-            writer.partitionBy(*partition_by).parquet(path)
+            self._connection.to_parquet(expr, path, partitionBy=partition_by)
         else:
-            writer.parquet(path)
-
-    def _to_spark_dataframe(self, expr: ir.Table) -> Any:
-        sql = self._connection.compile(expr)
-        return self._session.sql(sql)
+            self._connection.to_parquet(expr, path)
 
     def create_view_from_parquet(self, path: str, name: str) -> tuple[ir.Table, ObjectType]:
         spark_df = self._session.read.parquet(path)

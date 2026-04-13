@@ -160,7 +160,6 @@ class IbisBackend(ABC):
         """Create an ibis table expression from a raw SQL string."""
         return self.connection.sql(query)
 
-    @abstractmethod
     def write_parquet(
         self,
         expr: ir.Table,
@@ -168,6 +167,10 @@ class IbisBackend(ABC):
         partition_by: list[str] | None = None,
     ) -> None:
         """Write an ibis expression result to a Parquet file."""
+        if partition_by:
+            msg = f"{self.name} backend does not support partitioned Parquet writes."
+            raise NotImplementedError(msg)
+        self.connection.to_parquet(expr, path)
 
     @abstractmethod
     def create_view_from_parquet(self, path: str, name: str) -> tuple[ir.Table, ObjectType]:

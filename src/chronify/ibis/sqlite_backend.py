@@ -131,18 +131,6 @@ class SQLiteBackend(IbisBackend):
         self._commit_if_needed()
         logger.trace("Deleted rows from {} matching {}", name, values)
 
-    def write_parquet(
-        self,
-        expr: ir.Table,
-        path: str,
-        partition_by: list[str] | None = None,
-    ) -> None:
-        if partition_by:
-            msg = "SQLite backend does not support partitioned Parquet writes."
-            raise NotImplementedError(msg)
-        df = self._connection.execute(expr)
-        df.to_parquet(path)
-
     def create_view_from_parquet(self, path: str, name: str) -> tuple[ir.Table, ObjectType]:
         # SQLite can't read Parquet natively. Load into a table instead.
         df = pd.read_parquet(path)

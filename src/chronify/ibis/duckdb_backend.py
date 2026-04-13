@@ -107,16 +107,10 @@ class DuckDBBackend(IbisBackend):
         path: str,
         partition_by: list[str] | None = None,
     ) -> None:
-        escaped_path = path.replace("'", "''")
-        sql = self._connection.compile(expr)
         if partition_by:
-            partition_clause = ", ".join(_quote_identifier(c) for c in partition_by)
-            self._connection.raw_sql(
-                f"COPY ({sql}) TO '{escaped_path}' "
-                f"(FORMAT PARQUET, PARTITION_BY ({partition_clause}))"
-            )
+            self._connection.to_parquet(expr, path, partition_by=partition_by)
         else:
-            self._connection.raw_sql(f"COPY ({sql}) TO '{escaped_path}' (FORMAT PARQUET)")
+            self._connection.to_parquet(expr, path)
 
     def create_view_from_parquet(self, path: str, name: str) -> tuple[ir.Table, ObjectType]:
         parquet_path = Path(path)
