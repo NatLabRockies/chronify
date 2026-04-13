@@ -92,19 +92,20 @@ class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
             msg = f"No mapping available for {type(self._from_time_config)}"
             raise InvalidParameter(msg)
 
-        apply_mapping(
-            df_mapping,
-            mapping_schema,
-            from_schema,
-            self._to_schema,
-            self._backend,
-            self._data_adjustment,
-            output_file=output_file,
-            check_mapped_timestamps=check_mapped_timestamps,
-        )
-
-        if drop_table:
-            self._backend.drop_table(drop_table)
+        try:
+            apply_mapping(
+                df_mapping,
+                mapping_schema,
+                from_schema,
+                self._to_schema,
+                self._backend,
+                self._data_adjustment,
+                output_file=output_file,
+                check_mapped_timestamps=check_mapped_timestamps,
+            )
+        finally:
+            if drop_table and self._backend.has_table(drop_table):
+                self._backend.drop_table(drop_table)
 
     def check_schema_consistency(self) -> None:
         if isinstance(self._from_time_config, MonthDayHourTimeNTZ):
