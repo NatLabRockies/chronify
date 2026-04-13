@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from collections import Counter
 from contextlib import contextmanager
 from enum import StrEnum
+from functools import singledispatch, singledispatchmethod
 from typing import Any, Generator, Sequence, cast
 
 import ibis
@@ -86,22 +87,46 @@ def _arrow_needs_timestamp_normalization(
     return False
 
 
-def _get_columns(data: pd.DataFrame | pa.Table) -> list[str]:
-    if isinstance(data, pa.Table):
-        return cast(list[str], data.column_names)
+@singledispatch
+def _get_columns(data: Any) -> list[str]:
+    msg = f"Unsupported data type: {type(data)}"
+    raise TypeError(msg)
+
+
+@_get_columns.register
+def _(data: pd.DataFrame) -> list[str]:
     return list(data.columns)
 
 
-def _select_columns(data: pd.DataFrame | pa.Table, columns: list[str]) -> pd.DataFrame | pa.Table:
-    if isinstance(data, pa.Table):
-        return data.select(columns)
+@_get_columns.register
+def _(data: pa.Table) -> list[str]:
+    return cast(list[str], data.column_names)
+
+
+@_get_columns.register
+def _(data: ibis.Table) -> list[str]:
+    return list(data.columns)
+
+
+@singledispatch
+def _select_columns(data: Any, columns: list[str]) -> Any:
+    msg = f"Unsupported data type: {type(data)}"
+    raise TypeError(msg)
+
+
+@_select_columns.register
+def _(data: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     return data.loc[:, columns]
 
 
-def _row_count(data: pd.DataFrame | pa.Table) -> int:
-    if isinstance(data, pa.Table):
-        return cast(int, data.num_rows)
-    return len(data)
+@_select_columns.register
+def _(data: pa.Table, columns: list[str]) -> pa.Table:
+    return data.select(columns)
+
+
+@_select_columns.register
+def _(data: ibis.Table, columns: list[str]) -> ibis.Table:
+    return data.select(columns)
 
 
 def _validate_insert_columns(
@@ -143,14 +168,14 @@ class IbisBackend(ABC):
     def create_table(
         self,
         name: str,
-        obj: pd.DataFrame | pa.Table | ir.Table | None = None,
+        obj: pd.DataFrame | pa.Table | ibis.Table | None = None,
         schema: ibis.Schema | None = None,
         overwrite: bool = False,
-    ) -> ir.Table:
+    ) -> ibis.Table:
         """Create a table in the database."""
         return self.connection.create_table(name, obj=obj, schema=schema, overwrite=overwrite)
 
-    def create_view(self, name: str, expr: ir.Table) -> ir.Table:
+    def create_view(self, name: str, expr: ibis.Table) -> ibis.Table:
         """Create a view in the database."""
         return self.connection.create_view(name, expr, overwrite=False)
 
@@ -166,11 +191,11 @@ class IbisBackend(ABC):
         """List all user tables in the database."""
         return cast(list[str], self.connection.list_tables())
 
-    def table(self, name: str) -> ir.Table:
+    def table(self, name: str) -> ibis.Table:
         """Return an ibis table expression for the named table."""
         return self.connection.table(name)
 
-    def insert(self, name: str, data: pd.DataFrame | pa.Table) -> None:
+    def insert(self, name: str, data: pd.DataFrame | pa.Table | ibis.Table) -> None:
         """Insert data into an existing table.
 
         Validates that the data columns match the target table, reorders them,
@@ -182,7 +207,7 @@ class IbisBackend(ABC):
         _validate_insert_columns(name, target_columns, _get_columns(data))
         ordered = _select_columns(data, target_columns)
         self.connection.insert(name, ordered)
-        logger.trace("Inserted {} rows into {}", _row_count(ordered), name)
+        logger.trace("Inserted data into {}", name)
 
     @abstractmethod
     def delete_rows(self, name: str, values: dict[str, Any]) -> None:
@@ -197,13 +222,13 @@ class IbisBackend(ABC):
         for large tables."""
         return cast(pd.DataFrame, self.connection.execute(expr))
 
-    def sql(self, query: str) -> ir.Table:
+    def sql(self, query: str) -> ibis.Table:
         """Create an ibis table expression from a raw SQL string."""
         return self.connection.sql(query)
 
     def write_parquet(
         self,
-        expr: ir.Table,
+        expr: ibis.Table,
         path: str,
         partition_by: list[str] | None = None,
     ) -> None:
@@ -214,7 +239,7 @@ class IbisBackend(ABC):
         self.connection.to_parquet(expr, path)
 
     @abstractmethod
-    def create_view_from_parquet(self, path: str, name: str) -> tuple[ir.Table, ObjectType]:
+    def create_view_from_parquet(self, path: str, name: str) -> tuple[ibis.Table, ObjectType]:
         """Create a view or table backed by a Parquet file.
 
         Returns the table expression and the type of object created, since some
@@ -235,53 +260,74 @@ class IbisBackend(ABC):
         logger.trace("execute_sql_to_df: {}", query)
         return cast(pd.DataFrame, self.sql(query).execute())
 
-    def read_query(self, expr: ir.Table, config: TimeBaseModel) -> pd.DataFrame:
+    def read_query(self, expr: ibis.Table, config: TimeBaseModel) -> pd.DataFrame:
         """Execute an Ibis expression and return a pandas DataFrame."""
         return self.execute(self.apply_schema_types(expr, config))
 
-    def apply_schema_types(self, expr: ir.Table, config: TimeBaseModel) -> ir.Table:
+    def apply_schema_types(self, expr: ibis.Table, config: TimeBaseModel) -> ibis.Table:
         """Return ``expr`` with backend-specific casts applied so its Ibis type
         matches ``config``.
 
-        Default: no-op. Backends whose storage loses type information (e.g.
-        Spark, which stores all timestamps as session-local) should override to
-        add lazy ``cast`` expressions, so callers get correctly-typed pandas
-        output without forcing a materialize-then-normalize round-trip.
+        Default: no-op. Backends whose schema cannot express the full type
+        (e.g. Spark, which has no per-column timezone — only a session-wide
+        ``spark.sql.session.timeZone`` — so ``TIMESTAMP`` columns are reported
+        as tz-naive even when the values are true UTC instants) should
+        override to add lazy ``cast`` expressions. This lets callers get
+        correctly-typed pandas output without forcing a
+        materialize-then-normalize round-trip.
         """
         return expr
 
     def write_table(
         self,
-        data: pd.DataFrame | pa.Table,
+        data: pd.DataFrame | pa.Table | ibis.Table,
         name: str,
         configs: Sequence[TimeBaseModel],
         if_exists: str = "append",
     ) -> None:
-        """Write tabular data to the database, applying backend-specific normalization."""
+        """Write tabular data to the database, applying backend-specific normalization.
+
+        ``ibis.Table`` inputs are passed through to the underlying connection so
+        materialization can be deferred; backends that cannot ingest an ibis
+        expression directly should override :meth:`_prepare_write_data` to
+        materialize it.
+        """
         _check_one_config_per_datetime_column(configs)
         prepared = self._prepare_write_data(data, configs)
         self._apply_if_exists(prepared, name, if_exists)
 
+    @singledispatchmethod
     def _prepare_write_data(
         self,
-        data: pd.DataFrame | pa.Table,
+        data: Any,
         configs: Sequence[TimeBaseModel],
-    ) -> pd.DataFrame | pa.Table:
+    ) -> pd.DataFrame | pa.Table | ibis.Table:
         """Normalize data before insert/create_table.
 
         Default behavior is the DuckDB path: accept Arrow natively when possible,
         otherwise convert to pandas to normalize tz-sensitive columns. Subclasses
         that cannot ingest Arrow directly should convert here.
         """
-        if isinstance(data, pa.Table) and _arrow_needs_timestamp_normalization(data, configs):
-            data = data.to_pandas()
-        if isinstance(data, pd.DataFrame):
-            data = _normalize_timestamps(data, configs)
+        msg = f"Unsupported data type: {type(data)}"
+        raise TypeError(msg)
+
+    @_prepare_write_data.register
+    def _(self, data: pd.DataFrame, configs: Sequence[TimeBaseModel]) -> pd.DataFrame:
+        return _normalize_timestamps(data, configs)
+
+    @_prepare_write_data.register
+    def _(self, data: pa.Table, configs: Sequence[TimeBaseModel]) -> pd.DataFrame | pa.Table:
+        if _arrow_needs_timestamp_normalization(data, configs):
+            return self._prepare_write_data(data.to_pandas(), configs)
+        return data
+
+    @_prepare_write_data.register
+    def _(self, data: ibis.Table, configs: Sequence[TimeBaseModel]) -> ibis.Table:
         return data
 
     def _apply_if_exists(
         self,
-        data: pd.DataFrame | pa.Table,
+        data: pd.DataFrame | pa.Table | ibis.Table,
         name: str,
         if_exists: str,
     ) -> None:
@@ -289,8 +335,7 @@ class IbisBackend(ABC):
             case "append":
                 self.insert(name, data)
             case "replace":
-                self.drop_table(name)
-                self.create_table(name, data)
+                self.create_table(name, data, overwrite=True)
             case "fail":
                 self.create_table(name, data)
             case _:

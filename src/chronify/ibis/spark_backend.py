@@ -8,7 +8,6 @@ from urllib.parse import urlparse, unquote
 
 import ibis
 import ibis.expr.datatypes as dt
-import ibis.expr.types as ir
 import pandas as pd
 import pyarrow as pa
 from loguru import logger
@@ -59,10 +58,10 @@ class SparkBackend(IbisBackend):
     def create_table(
         self,
         name: str,
-        obj: pd.DataFrame | pa.Table | ir.Table | None = None,
+        obj: pd.DataFrame | pa.Table | ibis.Table | None = None,
         schema: ibis.Schema | None = None,
         overwrite: bool = False,
-    ) -> ir.Table:
+    ) -> ibis.Table:
         try:
             return self._connection.create_table(name, obj=obj, schema=schema, overwrite=overwrite)
         except Exception as exc:
@@ -103,7 +102,7 @@ class SparkBackend(IbisBackend):
 
     def write_parquet(
         self,
-        expr: ir.Table,
+        expr: ibis.Table,
         path: str,
         partition_by: list[str] | None = None,
     ) -> None:
@@ -112,7 +111,7 @@ class SparkBackend(IbisBackend):
         else:
             self._connection.to_parquet(expr, path)
 
-    def create_view_from_parquet(self, path: str, name: str) -> tuple[ir.Table, ObjectType]:
+    def create_view_from_parquet(self, path: str, name: str) -> tuple[ibis.Table, ObjectType]:
         self._connection.create_view(name, self._connection.read_parquet(path))
         return self.table(name), ObjectType.VIEW
 
@@ -140,13 +139,17 @@ class SparkBackend(IbisBackend):
         if path.exists():
             shutil.rmtree(path)
 
-    def apply_schema_types(self, expr: ir.Table, config: TimeBaseModel) -> ir.Table:
-        """Cast the time column to the Ibis type implied by ``config``.
+    def apply_schema_types(self, expr: ibis.Table, config: TimeBaseModel) -> ibis.Table:
+        """Re-attach the timezone annotation to the time column's Ibis type.
 
-        Spark stores all timestamps as session-local (no per-column tz
-        metadata), so a column declared ``TIMESTAMP_TZ`` reads back tz-naive
-        unless we re-type it in the expression. The session is pinned to UTC
-        (see :meth:`_validate_session`), so the cast is lossless.
+        Spark's schema has no per-column timezone — only a session-wide
+        ``spark.sql.session.timeZone`` — so Ibis reports any Spark
+        ``TIMESTAMP`` column as ``Timestamp(timezone=None)`` even though the
+        underlying values are true UTC instants. The session is pinned to UTC
+        (see :meth:`_validate_session`), so casting to
+        ``Timestamp(timezone="UTC")`` only rewrites the type annotation; no
+        value conversion occurs. Downstream consumers (pandas, Arrow) then
+        materialize a tz-aware column.
         """
         if not isinstance(config, _DATETIME_RANGES):
             return expr

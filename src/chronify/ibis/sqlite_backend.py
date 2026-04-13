@@ -3,10 +3,10 @@
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+from functools import singledispatchmethod
 from typing import Any, Sequence
 
 import ibis
-import ibis.expr.types as ir
 import pandas as pd
 import pyarrow as pa
 from loguru import logger
@@ -91,19 +91,21 @@ class SQLiteBackend(IbisBackend):
     def create_table(
         self,
         name: str,
-        obj: pd.DataFrame | pa.Table | ir.Table | None = None,
+        obj: pd.DataFrame | pa.Table | ibis.Table | None = None,
         schema: ibis.Schema | None = None,
         overwrite: bool = False,
-    ) -> ir.Table:
-        if isinstance(obj, ir.Table):
+    ) -> ibis.Table:
+        if isinstance(obj, ibis.Table):
             # SQLite CREATE TABLE AS SELECT loses datetime type info.
             # Execute the expression first, then create from the DataFrame.
             df = self._connection.execute(obj)
             return self._connection.create_table(name, obj=df, overwrite=overwrite)
         return self._connection.create_table(name, obj=obj, schema=schema, overwrite=overwrite)
 
-    def insert(self, name: str, data: pd.DataFrame | pa.Table) -> None:
-        if isinstance(data, pa.Table):
+    def insert(self, name: str, data: pd.DataFrame | pa.Table | ibis.Table) -> None:
+        if isinstance(data, ibis.Table):
+            data = data.execute()
+        elif isinstance(data, pa.Table):
             data = data.to_pandas()
         # Use raw SQLite cursor for parameterized inserts
         con = self._connection.con  # raw sqlite3 connection
@@ -131,7 +133,7 @@ class SQLiteBackend(IbisBackend):
         self._commit_if_needed()
         logger.trace("Deleted rows from {} matching {}", name, values)
 
-    def create_view_from_parquet(self, path: str, name: str) -> tuple[ir.Table, ObjectType]:
+    def create_view_from_parquet(self, path: str, name: str) -> tuple[ibis.Table, ObjectType]:
         # SQLite can't read Parquet natively. Load into a table instead.
         df = pd.read_parquet(path)
         return self.create_table(name, obj=df), ObjectType.TABLE
@@ -172,9 +174,10 @@ class SQLiteBackend(IbisBackend):
         if not self._in_transaction:
             self._connection.con.commit()
 
+    @singledispatchmethod
     def _prepare_write_data(
         self,
-        data: pd.DataFrame | pa.Table,
+        data: Any,
         configs: Sequence[TimeBaseModel],
     ) -> pd.DataFrame:
         """SQLite stores timestamps as text, so joins compare raw strings.
@@ -183,8 +186,19 @@ class SQLiteBackend(IbisBackend):
         written from different source zones (e.g., source table in ``Etc/GMT+5``
         vs. a mapping table localized from tz-naive input) align.
         """
-        if isinstance(data, pa.Table):
-            data = data.to_pandas()
+        msg = f"Unsupported data type: {type(data)}"
+        raise TypeError(msg)
+
+    @_prepare_write_data.register
+    def _(self, data: pa.Table, configs: Sequence[TimeBaseModel]) -> pd.DataFrame:
+        return self._prepare_write_data(data.to_pandas(), configs)
+
+    @_prepare_write_data.register
+    def _(self, data: ibis.Table, configs: Sequence[TimeBaseModel]) -> pd.DataFrame:
+        return self._prepare_write_data(data.execute(), configs)
+
+    @_prepare_write_data.register
+    def _(self, data: pd.DataFrame, configs: Sequence[TimeBaseModel]) -> pd.DataFrame:
         data = _normalize_timestamps(data, configs)
         copied = False
         for config in configs:

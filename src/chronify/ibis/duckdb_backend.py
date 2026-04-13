@@ -78,14 +78,14 @@ class DuckDBBackend(IbisBackend):
     def execute(self, expr: ir.Expr) -> pd.DataFrame:
         # Bypass Ibis's generic pandas materialization and use DuckDB's native
         # cursor.fetch_df(), which is zero-copy from Arrow.
-        if isinstance(expr, ir.Table):
+        if isinstance(expr, ibis.Table):
             sql = self._connection.compile(expr)
             return cast(pd.DataFrame, self._connection.con.execute(sql).fetch_df())
         return cast(pd.DataFrame, self._connection.execute(expr))
 
     def write_parquet(
         self,
-        expr: ir.Table,
+        expr: ibis.Table,
         path: str,
         partition_by: list[str] | None = None,
     ) -> None:
@@ -94,7 +94,7 @@ class DuckDBBackend(IbisBackend):
         else:
             self._connection.to_parquet(expr, path)
 
-    def create_view_from_parquet(self, path: str, name: str) -> tuple[ir.Table, ObjectType]:
+    def create_view_from_parquet(self, path: str, name: str) -> tuple[ibis.Table, ObjectType]:
         parquet_path = Path(path)
         if parquet_path.is_dir():
             read_path = str(parquet_path / "**" / "*.parquet").replace("\\", "/")

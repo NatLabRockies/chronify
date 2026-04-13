@@ -4,7 +4,6 @@ from typing import Any, Optional, cast
 from datetime import tzinfo
 
 import ibis
-import ibis.expr.types as ir
 import pandas as pd
 from loguru import logger
 
@@ -102,7 +101,7 @@ class Store:
         """Dispose of the current connections."""
         self._backend.dispose()
 
-    def get_table(self, name: str) -> ir.Table:
+    def get_table(self, name: str) -> ibis.Table:
         """Return the ibis Table expression."""
         if not self.has_table(name):
             msg = f"{name=}"
@@ -117,7 +116,7 @@ class Store:
         """Return a list of user tables in the database."""
         return [x for x in self._backend.list_tables() if x != SchemaManager.SCHEMAS_TABLE]
 
-    def try_get_table(self, name: str) -> ir.Table | None:
+    def try_get_table(self, name: str) -> ibis.Table | None:
         """Return the ibis Table expression or None if it is not stored."""
         if not self.has_table(name):
             return None
@@ -246,7 +245,7 @@ class Store:
 
     def ingest_pivoted_table(
         self,
-        data: pd.DataFrame | ir.Table,
+        data: pd.DataFrame | ibis.Table,
         src_schema: PivotedTableSchema | CsvTableSchema,
         dst_schema: TableSchema,
     ) -> bool:
@@ -255,7 +254,7 @@ class Store:
 
     def ingest_pivoted_tables(
         self,
-        data: Iterable[pd.DataFrame | ir.Table],
+        data: Iterable[pd.DataFrame | ibis.Table],
         src_schema: PivotedTableSchema | CsvTableSchema,
         dst_schema: TableSchema,
     ) -> bool:
@@ -274,7 +273,7 @@ class Store:
 
     def _ingest_pivoted_tables(
         self,
-        data: Iterable[pd.DataFrame | ir.Table],
+        data: Iterable[pd.DataFrame | ibis.Table],
         src_schema: PivotedTableSchema | CsvTableSchema,
         dst_schema: TableSchema,
     ) -> bool:
@@ -287,12 +286,12 @@ class Store:
 
     def _ingest_pivoted_table(
         self,
-        data: pd.DataFrame | ir.Table,
+        data: pd.DataFrame | ibis.Table,
         src_schema: PivotedTableSchema | CsvTableSchema,
         dst_schema: TableSchema,
     ) -> bool:
         assert src_schema.pivoted_dimension_name is not None
-        expr = data if isinstance(data, ir.Table) else ibis.memtable(data)
+        expr = data if isinstance(data, ibis.Table) else ibis.memtable(data)
         unpivoted = expr.pivot_longer(
             list(src_schema.value_columns),
             names_to=src_schema.pivoted_dimension_name,
@@ -302,7 +301,7 @@ class Store:
 
     def ingest_table(
         self,
-        data: pd.DataFrame | ir.Table,
+        data: pd.DataFrame | ibis.Table,
         schema: TableSchema,
         **kwargs: Any,
     ) -> bool:
@@ -330,7 +329,7 @@ class Store:
 
     def ingest_tables(
         self,
-        data: Iterable[pd.DataFrame | ir.Table],
+        data: Iterable[pd.DataFrame | ibis.Table],
         schema: TableSchema,
         **kwargs: Any,
     ) -> bool:
@@ -353,7 +352,7 @@ class Store:
 
     def _ingest_tables(
         self,
-        data: Iterable[pd.DataFrame | ir.Table],
+        data: Iterable[pd.DataFrame | ibis.Table],
         schema: TableSchema,
         skip_time_checks: bool = False,
     ) -> bool:
@@ -367,18 +366,17 @@ class Store:
 
     def _ingest_table(
         self,
-        data: pd.DataFrame | ir.Table,
+        data: pd.DataFrame | ibis.Table,
         schema: TableSchema,
     ) -> bool:
-        df = data.execute() if isinstance(data, ir.Table) else data
-        check_columns(df.columns, schema.list_columns())
+        check_columns(list(data.columns), schema.list_columns())
 
         if not self._backend.has_table(schema.name):
-            self._backend.write_table(df, schema.name, [schema.time_config], if_exists="fail")
+            self._backend.write_table(data, schema.name, [schema.time_config], if_exists="fail")
             self._schema_mgr.add_schema(schema)
             return True
         else:
-            self._backend.write_table(df, schema.name, [schema.time_config], if_exists="append")
+            self._backend.write_table(data, schema.name, [schema.time_config], if_exists="append")
             return False
 
     def map_table_time_config(
@@ -687,7 +685,7 @@ class Store:
         self._schema_mgr.add_schema(dst_schema)
         return dst_schema
 
-    def read_query(self, query: ir.Table | str) -> ir.Table:
+    def read_query(self, query: ibis.Table | str) -> ibis.Table:
         """Return the query result as an Ibis Table expression.
 
         Call ``.execute()`` on the returned expression to materialize a pandas DataFrame.
@@ -701,7 +699,7 @@ class Store:
             return self._backend.sql(query)
         return query
 
-    def read_table(self, name: str) -> ir.Table:
+    def read_table(self, name: str) -> ibis.Table:
         """Return the table as an Ibis Table expression.
 
         Call ``.execute()`` on the returned expression to materialize a pandas DataFrame.
@@ -734,7 +732,7 @@ class Store:
 
     def write_query_to_parquet(
         self,
-        stmt: ir.Table | str,
+        stmt: ibis.Table | str,
         file_path: Path | str,
         overwrite: bool = False,
         partition_columns: Optional[list[str]] = None,
@@ -852,7 +850,7 @@ class Store:
         self._schema_mgr.remove_schema(name)
         logger.info("Dropped table {}", name)
 
-    def create_view(self, schema: TableSchema, stmt: ir.Table) -> None:
+    def create_view(self, schema: TableSchema, stmt: ibis.Table) -> None:
         """Create a view in the database."""
         self._backend.create_view(schema.name, stmt)
         self._schema_mgr.add_schema(schema)
