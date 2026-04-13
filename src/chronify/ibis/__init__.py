@@ -1,5 +1,7 @@
 """Ibis backend abstraction layer for Chronify."""
 
+from typing import Any
+
 from chronify.exceptions import InvalidParameter
 from chronify.ibis.base import IbisBackend, ObjectType
 from chronify.ibis.duckdb_backend import DuckDBBackend
@@ -17,7 +19,7 @@ __all__ = [
 def make_backend(
     name: str,
     database: str | None = None,
-    **kwargs: object,
+    **kwargs: Any,
 ) -> IbisBackend:
     """Create an IbisBackend instance.
 
