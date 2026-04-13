@@ -2,8 +2,7 @@
 
 import uuid
 import shutil
-from contextlib import contextmanager
-from typing import Any, Generator, Sequence
+from typing import Any
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 
@@ -13,15 +12,9 @@ import ibis.expr.types as ir
 import pandas as pd
 import pyarrow as pa
 from loguru import logger
-from pandas import DatetimeTZDtype
 
 from chronify.exceptions import InvalidOperation, InvalidParameter
-from chronify.ibis.base import (
-    IbisBackend,
-    ObjectType,
-    _DATETIME_RANGES,
-    _normalize_timestamps,
-)
+from chronify.ibis.base import IbisBackend, ObjectType, _DATETIME_RANGES
 from chronify.time import TimeDataType
 from chronify.time_configs import TimeBaseModel
 
@@ -70,8 +63,6 @@ class SparkBackend(IbisBackend):
         schema: ibis.Schema | None = None,
         overwrite: bool = False,
     ) -> ir.Table:
-        if isinstance(obj, pd.DataFrame):
-            obj = self._prepare_data_for_spark(obj)
         try:
             return self._connection.create_table(name, obj=obj, schema=schema, overwrite=overwrite)
         except Exception as exc:
@@ -79,33 +70,6 @@ class SparkBackend(IbisBackend):
                 raise
             self._remove_managed_table_location(name)
             return self._connection.create_table(name, obj=obj, schema=schema, overwrite=overwrite)
-
-    def insert(self, name: str, data: pd.DataFrame | pa.Table) -> None:
-        if isinstance(data, pa.Table):
-            data = data.to_pandas()
-        # Spark doesn't support INSERT directly -- create a temp view and insert via SQL
-        target_columns = list(self.table(name).columns)
-        _validate_insert_columns(name, target_columns, list(data.columns))
-        data = data.loc[:, target_columns]
-        data = self._prepare_data_for_spark(data)
-        spark_df = self._session.createDataFrame(data)
-        quoted_name = _quote_identifier(name)
-        col_list = ", ".join(_quote_identifier(c) for c in target_columns)
-        with self._temp_view(spark_df) as tmp_view:
-            self._session.sql(
-                f"INSERT INTO {quoted_name} ({col_list}) SELECT {col_list} FROM {tmp_view}"
-            )
-        logger.trace("Inserted {} rows into {}", len(data), name)
-
-    @contextmanager
-    def _temp_view(self, spark_df: Any) -> Generator[str, None, None]:
-        """Register ``spark_df`` as a uniquely-named temp view; drop on exit."""
-        tmp_view = f"__chronify_tmp_{uuid.uuid4().hex}"
-        spark_df.createOrReplaceTempView(tmp_view)
-        try:
-            yield tmp_view
-        finally:
-            self._session.catalog.dropTempView(tmp_view)
 
     def delete_rows(self, name: str, values: dict[str, Any]) -> None:
         # Spark 3.4+ supports parameterized SQL via the ``args`` keyword.
@@ -149,8 +113,7 @@ class SparkBackend(IbisBackend):
             self._connection.to_parquet(expr, path)
 
     def create_view_from_parquet(self, path: str, name: str) -> tuple[ir.Table, ObjectType]:
-        spark_df = self._session.read.parquet(path)
-        spark_df.createOrReplaceTempView(name)
+        self._connection.create_view(name, self._connection.read_parquet(path))
         return self.table(name), ObjectType.VIEW
 
     def execute_sql(self, query: str) -> None:
@@ -195,30 +158,6 @@ class SparkBackend(IbisBackend):
             **{config.time_column: expr[config.time_column].cast(dt.Timestamp(timezone="UTC"))}
         )
 
-    def _prepare_write_data(
-        self,
-        data: pd.DataFrame | pa.Table,
-        configs: Sequence[TimeBaseModel],
-    ) -> pd.DataFrame:
-        """Spark ingestion goes through createDataFrame(pandas); Arrow must be converted."""
-        if isinstance(data, pa.Table):
-            data = data.to_pandas()
-        return _normalize_timestamps(data, configs)
-
-    @staticmethod
-    def _prepare_data_for_spark(df: pd.DataFrame) -> pd.DataFrame:
-        """Normalize tz-aware pandas timestamps for Spark ingestion.
-
-        Spark timestamps are timezone-naive and interpreted in the session time
-        zone. We require UTC sessions, so convert tz-aware columns to tz-naive
-        UTC timestamps before handing them to Spark.
-        """
-        df = df.copy()
-        for col in df.columns:
-            if isinstance(df[col].dtype, DatetimeTZDtype):
-                df[col] = df[col].dt.tz_convert("UTC").dt.tz_localize(None)
-        return df
-
     @staticmethod
     def _validate_session(session: Any) -> None:
         time_zone = session.conf.get("spark.sql.session.timeZone", None) or "UTC"
@@ -228,19 +167,6 @@ class SparkBackend(IbisBackend):
                 f"timestamp semantics, got {time_zone!r}."
             )
             raise InvalidParameter(msg)
-
-
-def _validate_insert_columns(
-    table_name: str, target_columns: list[str], data_columns: list[str]
-) -> None:
-    missing = [c for c in target_columns if c not in data_columns]
-    extra = [c for c in data_columns if c not in target_columns]
-    if missing or extra:
-        msg = (
-            f"Insert data columns do not match table {table_name!r}. "
-            f"Missing: {missing}. Extra: {extra}."
-        )
-        raise InvalidParameter(msg)
 
 
 def _quote_identifier(identifier: str) -> str:

@@ -86,6 +86,37 @@ def _arrow_needs_timestamp_normalization(
     return False
 
 
+def _get_columns(data: pd.DataFrame | pa.Table) -> list[str]:
+    if isinstance(data, pa.Table):
+        return cast(list[str], data.column_names)
+    return list(data.columns)
+
+
+def _select_columns(data: pd.DataFrame | pa.Table, columns: list[str]) -> pd.DataFrame | pa.Table:
+    if isinstance(data, pa.Table):
+        return data.select(columns)
+    return data.loc[:, columns]
+
+
+def _row_count(data: pd.DataFrame | pa.Table) -> int:
+    if isinstance(data, pa.Table):
+        return cast(int, data.num_rows)
+    return len(data)
+
+
+def _validate_insert_columns(
+    table_name: str, target_columns: list[str], data_columns: list[str]
+) -> None:
+    missing = [c for c in target_columns if c not in data_columns]
+    extra = [c for c in data_columns if c not in target_columns]
+    if missing or extra:
+        msg = (
+            f"Insert data columns do not match table {table_name!r}. "
+            f"Missing: {missing}. Extra: {extra}."
+        )
+        raise InvalidParameter(msg)
+
+
 class ObjectType(StrEnum):
     TABLE = "table"
     VIEW = "view"
@@ -139,9 +170,19 @@ class IbisBackend(ABC):
         """Return an ibis table expression for the named table."""
         return self.connection.table(name)
 
-    @abstractmethod
     def insert(self, name: str, data: pd.DataFrame | pa.Table) -> None:
-        """Insert data into an existing table."""
+        """Insert data into an existing table.
+
+        Validates that the data columns match the target table, reorders them,
+        and delegates to the underlying Ibis connection. Subclasses should
+        override when the default does not cooperate with backend-specific
+        transaction semantics.
+        """
+        target_columns = list(self.table(name).columns)
+        _validate_insert_columns(name, target_columns, _get_columns(data))
+        ordered = _select_columns(data, target_columns)
+        self.connection.insert(name, ordered)
+        logger.trace("Inserted {} rows into {}", _row_count(ordered), name)
 
     @abstractmethod
     def delete_rows(self, name: str, values: dict[str, Any]) -> None:

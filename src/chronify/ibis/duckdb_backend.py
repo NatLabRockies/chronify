@@ -7,7 +7,6 @@ from typing import Any, cast
 import ibis
 import ibis.expr.types as ir
 import pandas as pd
-import pyarrow as pa
 from loguru import logger
 
 from chronify.exceptions import ConflictingInputsError, InvalidOperation, InvalidParameter
@@ -68,23 +67,6 @@ class DuckDBBackend(IbisBackend):
         # Filter out internal ibis memtables
         return [t for t in tables if not t.startswith("ibis_pandas_memtable_")]
 
-    def insert(self, name: str, data: pd.DataFrame | pa.Table) -> None:
-        con = self._connection.con  # raw duckdb connection
-        target_columns = list(self.table(name).columns)
-        _validate_insert_columns(name, target_columns, _get_columns(data))
-        ordered_data = _select_columns(data, target_columns)
-        quoted_columns = ", ".join(f'"{col}"' for col in target_columns)
-        quoted_name = _quote_identifier(name)
-        con.register("__insert_df", ordered_data)
-        try:
-            con.execute(
-                f"INSERT INTO {quoted_name} ({quoted_columns}) "
-                f"SELECT {quoted_columns} FROM __insert_df"
-            )
-        finally:
-            con.unregister("__insert_df")
-        logger.trace("Inserted {} rows into {}", _row_count(data), name)
-
     def delete_rows(self, name: str, values: dict[str, Any]) -> None:
         con = self._connection.con
         quoted_name = _quote_identifier(name)
@@ -118,11 +100,7 @@ class DuckDBBackend(IbisBackend):
             read_path = str(parquet_path / "**" / "*.parquet").replace("\\", "/")
         else:
             read_path = str(parquet_path).replace("\\", "/")
-        quoted_name = _quote_identifier(name)
-        escaped_path = read_path.replace("'", "''")
-        self._connection.raw_sql(
-            f"CREATE VIEW {quoted_name} AS SELECT * FROM read_parquet('{escaped_path}')"
-        )
+        self._connection.create_view(name, self._connection.read_parquet(read_path))
         return self.table(name), ObjectType.VIEW
 
     def dispose(self) -> None:
@@ -153,6 +131,12 @@ class DuckDBBackend(IbisBackend):
         self._connection.con.execute("ROLLBACK")
 
 
+def _quote_identifier(identifier: str) -> str:
+    """Quote a SQL identifier for DuckDB, escaping embedded double quotes."""
+    escaped = identifier.replace('"', '""')
+    return f'"{escaped}"'
+
+
 def _infer_duckdb_path(connection: ibis.BaseBackend) -> str | None:
     """Return the database file path for an ibis DuckDB connection, or None for in-memory."""
     try:
@@ -165,40 +149,3 @@ def _infer_duckdb_path(connection: ibis.BaseBackend) -> str | None:
         return None
     path = result[0]
     return None if not path else str(path)
-
-
-def _validate_insert_columns(
-    table_name: str, target_columns: list[str], data_columns: list[str]
-) -> None:
-    missing = [c for c in target_columns if c not in data_columns]
-    extra = [c for c in data_columns if c not in target_columns]
-    if missing or extra:
-        msg = (
-            f"Insert data columns do not match table {table_name!r}. "
-            f"Missing: {missing}. Extra: {extra}."
-        )
-        raise InvalidParameter(msg)
-
-
-def _quote_identifier(identifier: str) -> str:
-    """Quote a SQL identifier for DuckDB, escaping embedded double quotes."""
-    escaped = identifier.replace('"', '""')
-    return f'"{escaped}"'
-
-
-def _get_columns(data: pd.DataFrame | pa.Table) -> list[str]:
-    if isinstance(data, pa.Table):
-        return cast(list[str], data.column_names)
-    return list(data.columns)
-
-
-def _select_columns(data: pd.DataFrame | pa.Table, columns: list[str]) -> pd.DataFrame | pa.Table:
-    if isinstance(data, pa.Table):
-        return data.select(columns)
-    return data.loc[:, columns]
-
-
-def _row_count(data: pd.DataFrame | pa.Table) -> int:
-    if isinstance(data, pa.Table):
-        return cast(int, data.num_rows)
-    return len(data)
