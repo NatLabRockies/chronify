@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse, unquote
 
 import ibis
+import ibis.expr.datatypes as dt
 import ibis.expr.types as ir
 import pandas as pd
 import pyarrow as pa
@@ -16,9 +17,9 @@ from pandas import DatetimeTZDtype
 
 from chronify.exceptions import InvalidOperation, InvalidParameter
 from chronify.ibis.base import (
-    DatetimeRanges,
     IbisBackend,
     ObjectType,
+    _DATETIME_RANGES,
     _normalize_timestamps,
 )
 from chronify.time import TimeDataType
@@ -176,9 +177,23 @@ class SparkBackend(IbisBackend):
         if path.exists():
             shutil.rmtree(path)
 
-    def _post_read_normalize(self, df: pd.DataFrame, config: DatetimeRanges) -> None:
-        """Spark returns tz-naive nanosecond timestamps; coerce to schema dtype + µs unit."""
-        _convert_spark_output_for_datetime(df, config)
+    def apply_schema_types(self, expr: ir.Table, config: TimeBaseModel) -> ir.Table:
+        """Cast the time column to the Ibis type implied by ``config``.
+
+        Spark stores all timestamps as session-local (no per-column tz
+        metadata), so a column declared ``TIMESTAMP_TZ`` reads back tz-naive
+        unless we re-type it in the expression. The session is pinned to UTC
+        (see :meth:`_validate_session`), so the cast is lossless.
+        """
+        if not isinstance(config, _DATETIME_RANGES):
+            return expr
+        if config.dtype != TimeDataType.TIMESTAMP_TZ:
+            return expr
+        if config.time_column not in expr.columns:
+            return expr
+        return expr.mutate(
+            **{config.time_column: expr[config.time_column].cast(dt.Timestamp(timezone="UTC"))}
+        )
 
     def _prepare_write_data(
         self,
@@ -213,29 +228,6 @@ class SparkBackend(IbisBackend):
                 f"timestamp semantics, got {time_zone!r}."
             )
             raise InvalidParameter(msg)
-
-
-def _convert_spark_output_for_datetime(df: pd.DataFrame, config: DatetimeRanges) -> None:
-    """Convert DataFrame datetime columns after Spark output."""
-    if config.time_column not in df.columns:
-        return
-
-    col = df[config.time_column]
-
-    if config.dtype == TimeDataType.TIMESTAMP_TZ:
-        if not pd.api.types.is_datetime64_any_dtype(col):
-            col = pd.to_datetime(col, utc=True)
-        elif isinstance(col.dtype, DatetimeTZDtype):
-            col = col.dt.tz_convert("UTC")
-        else:
-            col = col.dt.tz_localize("UTC")
-        df[config.time_column] = col.dt.as_unit("us")
-    else:
-        if not pd.api.types.is_datetime64_any_dtype(col):
-            col = pd.to_datetime(col, utc=False)
-            df[config.time_column] = col.astype("datetime64[us]")
-        if isinstance(col.dtype, DatetimeTZDtype):
-            df[config.time_column] = col.dt.tz_convert(None).astype("datetime64[us]")
 
 
 def _validate_insert_columns(

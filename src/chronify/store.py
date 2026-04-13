@@ -709,7 +709,9 @@ class Store:
         if not self.has_table(name):
             msg = f"{name=}"
             raise TableNotStored(msg)
-        return self._backend.table(name)
+        expr = self._backend.table(name)
+        schema = self._schema_mgr.get_schema(name)
+        return self._backend.apply_schema_types(expr, schema.time_config)
 
     def read_raw_query(self, query: str) -> pd.DataFrame:
         """Execute a raw SQL query on the backend and return the results as a DataFrame.

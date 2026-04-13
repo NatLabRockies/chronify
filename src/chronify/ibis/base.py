@@ -195,11 +195,19 @@ class IbisBackend(ABC):
         return cast(pd.DataFrame, self.sql(query).execute())
 
     def read_query(self, expr: ir.Table, config: TimeBaseModel) -> pd.DataFrame:
-        """Execute an Ibis expression and return a normalized pandas DataFrame."""
-        df = self.execute(expr)
-        if isinstance(config, _DATETIME_RANGES):
-            self._post_read_normalize(df, config)
-        return df
+        """Execute an Ibis expression and return a pandas DataFrame."""
+        return self.execute(self.apply_schema_types(expr, config))
+
+    def apply_schema_types(self, expr: ir.Table, config: TimeBaseModel) -> ir.Table:
+        """Return ``expr`` with backend-specific casts applied so its Ibis type
+        matches ``config``.
+
+        Default: no-op. Backends whose storage loses type information (e.g.
+        Spark, which stores all timestamps as session-local) should override to
+        add lazy ``cast`` expressions, so callers get correctly-typed pandas
+        output without forcing a materialize-then-normalize round-trip.
+        """
+        return expr
 
     def write_table(
         self,
@@ -212,13 +220,6 @@ class IbisBackend(ABC):
         _check_one_config_per_datetime_column(configs)
         prepared = self._prepare_write_data(data, configs)
         self._apply_if_exists(prepared, name, if_exists)
-
-    def _post_read_normalize(self, df: pd.DataFrame, config: DatetimeRanges) -> None:
-        """Backend-specific in-place normalization of a read DataFrame.
-
-        Default: no-op. Backends whose drivers return non-canonical datetime
-        types should override.
-        """
 
     def _prepare_write_data(
         self,
