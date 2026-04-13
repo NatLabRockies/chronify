@@ -24,14 +24,26 @@ class SparkBackend(IbisBackend):
     Requires pyspark to be installed (pip install chronify[spark]).
     """
 
-    def __init__(self, session: Any = None) -> None:
+    def __init__(self, session: Any = None, *, owns_session: bool | None = None) -> None:
+        """Construct a SparkBackend.
+
+        Parameters
+        ----------
+        session
+            Optional pre-existing PySpark session. When provided, the backend
+            does not own the session by default and will not stop it on
+            ``dispose()``.
+        owns_session
+            Override whether ``dispose()`` stops ``session``. Defaults to
+            ``True`` only when ``session`` is not provided.
+        """
         try:
             from pyspark.sql import SparkSession
         except ImportError as e:
             msg = "pyspark is required for SparkBackend. Install with: pip install chronify[spark]"
             raise ImportError(msg) from e
 
-        self._owns_session = session is None
+        self._owns_session = session is None if owns_session is None else owns_session
         if session is None:
             session = (
                 SparkSession.builder.master("local")

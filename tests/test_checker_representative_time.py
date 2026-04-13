@@ -1,5 +1,6 @@
-import pytest
+from typing import Any
 
+import pytest
 import pandas as pd
 
 from chronify.ibis import IbisBackend
@@ -9,7 +10,7 @@ from chronify.exceptions import InvalidTable
 
 
 def ingest_data_and_check(
-    backend: IbisBackend, df: pd.DataFrame, schema: TableSchema, error: tuple[any, str]
+    backend: IbisBackend, df: pd.DataFrame, schema: TableSchema, error: tuple[Any, str]
 ) -> None:
     backend.write_table(df, schema.name, [schema.time_config], if_exists="replace")
 

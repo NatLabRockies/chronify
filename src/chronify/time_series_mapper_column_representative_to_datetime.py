@@ -132,9 +132,8 @@ class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
         period_col = self._from_time_config.hour_columns[0]
 
         # Get distinct periods
-        df_periods = self._backend.execute_sql_to_df(
-            f"SELECT DISTINCT {period_col} FROM {self._from_schema.name}"
-        )
+        table = self._backend.table(self._from_schema.name)
+        df_periods = self._backend.execute(table.select(period_col).distinct())
         df_mapping = generate_period_mapping(df_periods.iloc[:, 0])
         self._backend.write_table(
             df_mapping,

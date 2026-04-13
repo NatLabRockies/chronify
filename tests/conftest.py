@@ -38,7 +38,7 @@ def _make_backend(name: str, tmp_path: Path | None = None, **kwargs: Any) -> Ibi
             .config("spark.sql.warehouse.dir", str(warehouse_dir))
             .getOrCreate()
         )
-        return SparkBackend(session=session, **kwargs)
+        return SparkBackend(session=session, owns_session=True, **kwargs)
     return make_backend(name, **kwargs)
 
 

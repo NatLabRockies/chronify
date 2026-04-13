@@ -404,7 +404,7 @@ def test_spark_dispose(tmp_path: Path) -> None:
         .config("spark.sql.warehouse.dir", str(warehouse_dir))
         .getOrCreate()
     )
-    backend = SparkBackend(session=session)
+    backend = SparkBackend(session=session, owns_session=True)
     backend.dispose()
 
 
