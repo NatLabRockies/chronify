@@ -26,5 +26,4 @@ def read_csv(path: Path | str, schema: CsvTableSchema, **kwargs: Any) -> DuckDBP
                 expr = f"timezone('{time_config.start.tzinfo.key}', {column}) AS {column}"  # type: ignore
         exprs.append(expr)
 
-    expr = ",".join(exprs)
-    return duckdb.sql(f"SELECT {expr} FROM rel")
+    return rel.project(",".join(exprs))

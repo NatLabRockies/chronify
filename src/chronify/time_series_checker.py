@@ -1,6 +1,7 @@
-from typing import Optional
+from typing import Any, Optional, cast
 from datetime import datetime, tzinfo
 
+import ibis
 import pandas as pd
 
 from chronify.exceptions import InvalidTable
@@ -118,14 +119,10 @@ class TimeSeriesChecker:
         if len(time_columns) == 1:
             return
 
-        all_are_null = " AND ".join((f"{x} IS NULL" for x in time_columns))
-        any_are_null = " OR ".join((f"{x} IS NULL" for x in time_columns))
-        query_all = f"SELECT COUNT(*) FROM {self._table_name} WHERE {all_are_null}"
-        query_any = f"SELECT COUNT(*) FROM {self._table_name} WHERE {any_are_null}"
-        df_all = self._backend.execute_sql_to_df(query_all)
-        df_any = self._backend.execute_sql_to_df(query_any)
-        count_all = df_all.iloc[0, 0]
-        count_any = df_any.iloc[0, 0]
+        table = self._backend.table(self._table_name)
+        null_exprs = [table[col].isnull() for col in time_columns]
+        count_all = int(cast(Any, table.filter(ibis.and_(*null_exprs)).count().execute()))
+        count_any = int(cast(Any, table.filter(ibis.or_(*null_exprs)).count().execute()))
         if count_all != count_any:
             msg = (
                 "If any time columns have a NULL value for a row, all time columns in that "
@@ -143,71 +140,35 @@ class TimeSeriesChecker:
         else:
             has_tz_naive_prevailing = False
 
-        id_cols = ",".join(self._schema.time_array_id_columns)
-        time_cols = ",".join(self._schema.time_config.list_time_columns())
-        where_clause = f"{self._time_generator.list_time_columns()[0]} IS NOT NULL"
-        on_expr = " AND ".join([f"t1.{x} = t2.{x}" for x in self._schema.time_array_id_columns])
-        t1_id_cols = ",".join((f"t1.{x}" for x in self._schema.time_array_id_columns))
+        id_cols = self._schema.time_array_id_columns
+        time_cols = self._schema.time_config.list_time_columns()
+        first_time_col = self._time_generator.list_time_columns()[0]
 
-        if not self._schema.time_array_id_columns:
-            query = f"""
-                WITH distinct_time_values_by_array AS (
-                    SELECT DISTINCT {time_cols}
-                    FROM {self._table_name}
-                    WHERE {where_clause}
-                ),
-                t1 AS (
-                    SELECT COUNT(*) AS distinct_count_by_ta
-                    FROM distinct_time_values_by_array
-                ),
-                t2 AS (
-                    SELECT COUNT(*) AS count_by_ta
-                    FROM {self._table_name}
-                    WHERE {where_clause}
-                )
-                SELECT
-                    t1.distinct_count_by_ta
-                    ,t2.count_by_ta
-                FROM t1
-                CROSS JOIN t2
-            """
+        table = self._backend.table(self._table_name)
+        filtered = table.filter(table[first_time_col].notnull())
+
+        if not id_cols:
+            distinct_count_by_ta = int(
+                cast(Any, filtered.select(time_cols).distinct().count().execute())
+            )
+            count_by_ta = int(cast(Any, filtered.count().execute()))
+            df = pd.DataFrame(
+                [{"distinct_count_by_ta": distinct_count_by_ta, "count_by_ta": count_by_ta}]
+            )
         else:
-            query = f"""
-                WITH distinct_time_values_by_array AS (
-                    SELECT DISTINCT {id_cols}, {time_cols}
-                    FROM {self._table_name}
-                    WHERE {where_clause}
-                ),
-                t1 AS (
-                    SELECT {id_cols}, COUNT(*) AS distinct_count_by_ta
-                    FROM distinct_time_values_by_array
-                    GROUP BY {id_cols}
-                ),
-                t2 AS (
-                    SELECT {id_cols}, COUNT(*) AS count_by_ta
-                    FROM {self._table_name}
-                    WHERE {where_clause}
-                    GROUP BY {id_cols}
-                )
-                SELECT
-                    t1.distinct_count_by_ta
-                    ,t2.count_by_ta
-                    ,{t1_id_cols}
-                FROM t1
-                JOIN t2
-                ON {on_expr}
-            """
+            counts = filtered.group_by(id_cols).aggregate(count_by_ta=filtered.count())
+            distinct_rows = filtered.select(id_cols + time_cols).distinct()
+            distinct = distinct_rows.group_by(id_cols).aggregate(
+                distinct_count_by_ta=distinct_rows.count()
+            )
+            df = counts.join(distinct, id_cols).execute()
 
-        df = self._backend.execute_sql_to_df(query)
         for _, result in df.iterrows():
-            distinct_count_by_ta = result.iloc[0]
-            count_by_ta = result.iloc[1]
+            distinct_count_by_ta = result["distinct_count_by_ta"]
+            count_by_ta = result["count_by_ta"]
 
             if has_tz_naive_prevailing and not count_by_ta == count:
-                id_vals = result.iloc[2:]
-                values = ", ".join(
-                    f"{x}={y}" for x, y in zip(self._schema.time_array_id_columns, id_vals)
-                )
+                values = ", ".join(f"{x}={result[x]}" for x in id_cols)
                 msg = (
                     f"The count of time values in each time array must be {count}."
                     f"Time array identifiers: {values}. "
@@ -216,10 +177,7 @@ class TimeSeriesChecker:
                 raise InvalidTable(msg)
 
             if not has_tz_naive_prevailing and not count_by_ta == count == distinct_count_by_ta:
-                id_vals = result.iloc[2:]
-                values = ", ".join(
-                    f"{x}={y}" for x, y in zip(self._schema.time_array_id_columns, id_vals)
-                )
+                values = ", ".join(f"{x}={result[x]}" for x in id_cols)
                 msg = (
                     f"The count of time values in each time array must be {count}, and each "
                     "value must be distinct. "
