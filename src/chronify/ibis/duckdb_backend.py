@@ -11,7 +11,7 @@ import pyarrow as pa
 from loguru import logger
 
 from chronify.exceptions import ConflictingInputsError, InvalidOperation, InvalidParameter
-from chronify.ibis.base import IbisBackend, ObjectType, _is_ddl
+from chronify.ibis.base import IbisBackend, ObjectType
 
 
 class DuckDBBackend(IbisBackend):
@@ -39,7 +39,6 @@ class DuckDBBackend(IbisBackend):
             msg = f"{database=} and {connection=} cannot both be set"
             raise ConflictingInputsError(msg)
 
-        self._table_cache = None
         self._owns_connection = connection is None
         if connection is None:
             db = str(database)
@@ -64,39 +63,10 @@ class DuckDBBackend(IbisBackend):
     def connection(self) -> ibis.BaseBackend:
         return self._connection
 
-    def create_table(
-        self,
-        name: str,
-        obj: pd.DataFrame | pa.Table | ir.Table | None = None,
-        schema: ibis.Schema | None = None,
-        overwrite: bool = False,
-    ) -> ir.Table:
-        table = self._connection.create_table(name, obj=obj, schema=schema, overwrite=overwrite)
-        self._mark_table_created(name)
-        return table
-
-    def create_view(self, name: str, expr: ir.Table) -> ir.Table:
-        view = self._connection.create_view(name, expr, overwrite=False)
-        self._mark_table_created(name)
-        return view
-
-    def drop_table(self, name: str) -> None:
-        self._connection.drop_table(name, force=True)
-        self._mark_table_dropped(name)
-
-    def drop_view(self, name: str) -> None:
-        self._connection.drop_view(name, force=True)
-        self._mark_table_dropped(name)
-
     def list_tables(self) -> list[str]:
         tables = self._connection.list_tables()
         # Filter out internal ibis memtables
-        tables = [t for t in tables if not t.startswith("ibis_pandas_memtable_")]
-        self._table_cache = set(tables)
-        return tables
-
-    def table(self, name: str) -> ir.Table:
-        return self._connection.table(name)
+        return [t for t in tables if not t.startswith("ibis_pandas_memtable_")]
 
     def insert(self, name: str, data: pd.DataFrame | pa.Table) -> None:
         con = self._connection.con  # raw duckdb connection
@@ -131,9 +101,6 @@ class DuckDBBackend(IbisBackend):
             return cast(pd.DataFrame, self._connection.con.execute(sql).fetch_df())
         return cast(pd.DataFrame, self._connection.execute(expr))
 
-    def sql(self, query: str) -> ir.Table:
-        return self._connection.sql(query)
-
     def write_parquet(
         self,
         expr: ir.Table,
@@ -162,14 +129,7 @@ class DuckDBBackend(IbisBackend):
         self._connection.raw_sql(
             f"CREATE VIEW {quoted_name} AS SELECT * FROM read_parquet('{escaped_path}')"
         )
-        self._mark_table_created(name)
         return self.table(name), ObjectType.VIEW
-
-    def execute_sql(self, query: str) -> None:
-        logger.trace("execute_sql: {}", query)
-        self._connection.raw_sql(query)
-        if _is_ddl(query):
-            self._invalidate_table_cache()
 
     def execute_sql_to_df(self, query: str) -> pd.DataFrame:
         logger.trace("execute_sql_to_df: {}", query)
@@ -202,7 +162,6 @@ class DuckDBBackend(IbisBackend):
 
     def _rollback_transaction(self) -> None:
         self._connection.con.execute("ROLLBACK")
-        self._invalidate_table_cache()
 
 
 def _infer_duckdb_path(connection: ibis.BaseBackend) -> str | None:

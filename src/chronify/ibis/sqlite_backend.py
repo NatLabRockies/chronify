@@ -3,7 +3,7 @@
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Sequence, cast
+from typing import Any, Sequence
 
 import ibis
 import ibis.expr.types as ir
@@ -18,7 +18,6 @@ from chronify.ibis.base import (
     ObjectType,
     TimeBaseModel,
     _DATETIME_RANGES,
-    _is_ddl,
     _normalize_timestamps,
 )
 from chronify.time import TimeDataType
@@ -64,7 +63,6 @@ class SQLiteBackend(IbisBackend):
             msg = f"{database=} and {connection=} cannot both be set"
             raise ConflictingInputsError(msg)
 
-        self._table_cache = None
         self._in_transaction = False
         self._owns_connection = connection is None
         if connection is None:
@@ -101,34 +99,8 @@ class SQLiteBackend(IbisBackend):
             # SQLite CREATE TABLE AS SELECT loses datetime type info.
             # Execute the expression first, then create from the DataFrame.
             df = self._connection.execute(obj)
-            table = self._connection.create_table(name, obj=df, overwrite=overwrite)
-        else:
-            table = self._connection.create_table(
-                name, obj=obj, schema=schema, overwrite=overwrite
-            )
-        self._mark_table_created(name)
-        return table
-
-    def create_view(self, name: str, expr: ir.Table) -> ir.Table:
-        view = self._connection.create_view(name, expr, overwrite=False)
-        self._mark_table_created(name)
-        return view
-
-    def drop_table(self, name: str) -> None:
-        self._connection.drop_table(name, force=True)
-        self._mark_table_dropped(name)
-
-    def drop_view(self, name: str) -> None:
-        self._connection.drop_view(name, force=True)
-        self._mark_table_dropped(name)
-
-    def list_tables(self) -> list[str]:
-        tables = cast(list[str], self._connection.list_tables())
-        self._table_cache = set(tables)
-        return tables
-
-    def table(self, name: str) -> ir.Table:
-        return self._connection.table(name)
+            return self._connection.create_table(name, obj=df, overwrite=overwrite)
+        return self._connection.create_table(name, obj=obj, schema=schema, overwrite=overwrite)
 
     def insert(self, name: str, data: pd.DataFrame | pa.Table) -> None:
         if isinstance(data, pa.Table):
@@ -159,12 +131,6 @@ class SQLiteBackend(IbisBackend):
         self._commit_if_needed()
         logger.trace("Deleted rows from {} matching {}", name, values)
 
-    def execute(self, expr: ir.Expr) -> pd.DataFrame:
-        return cast(pd.DataFrame, self._connection.execute(expr))
-
-    def sql(self, query: str) -> ir.Table:
-        return self._connection.sql(query)
-
     def write_parquet(
         self,
         expr: ir.Table,
@@ -187,8 +153,6 @@ class SQLiteBackend(IbisBackend):
         con = self._connection.con
         con.execute(query)
         self._commit_if_needed()
-        if _is_ddl(query):
-            self._invalidate_table_cache()
 
     def execute_sql_to_df(self, query: str) -> pd.DataFrame:
         logger.trace("execute_sql_to_df: {}", query)
@@ -223,7 +187,6 @@ class SQLiteBackend(IbisBackend):
     def _rollback_transaction(self) -> None:
         self._connection.con.rollback()
         self._in_transaction = False
-        self._invalidate_table_cache()
 
     def _commit_if_needed(self) -> None:
         if not self._in_transaction:
