@@ -16,11 +16,11 @@ from chronify.exceptions import ConflictingInputsError, InvalidOperation, Invali
 from chronify.ibis.base import (
     IbisBackend,
     ObjectType,
-    TimeBaseModel,
     _DATETIME_RANGES,
     _normalize_timestamps,
 )
 from chronify.time import TimeDataType
+from chronify.time_configs import TimeBaseModel
 
 
 def _adapt_value(v: Any) -> Any:

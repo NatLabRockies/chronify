@@ -19,10 +19,10 @@ from chronify.ibis.base import (
     DatetimeRanges,
     IbisBackend,
     ObjectType,
-    TimeBaseModel,
-    TimeDataType,
     _normalize_timestamps,
 )
+from chronify.time import TimeDataType
+from chronify.time_configs import TimeBaseModel
 
 
 class SparkBackend(IbisBackend):

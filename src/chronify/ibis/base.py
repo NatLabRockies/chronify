@@ -22,7 +22,7 @@ from chronify.time_configs import (
     TimeBaseModel,
 )
 
-_DATETIME_RANGES: tuple[type, ...] = (DatetimeRange, DatetimeRangeWithTZColumn)
+_DATETIME_RANGES = (DatetimeRange, DatetimeRangeWithTZColumn)
 DatetimeRanges = DatetimeRange | DatetimeRangeWithTZColumn
 
 
