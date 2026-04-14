@@ -2,7 +2,8 @@
 
 import uuid
 import shutil
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Generator
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 
@@ -12,7 +13,7 @@ import pandas as pd
 import pyarrow as pa
 from loguru import logger
 
-from chronify.exceptions import InvalidOperation, InvalidParameter
+from chronify.exceptions import InvalidOperation
 from chronify.ibis.base import IbisBackend, ObjectType, _DATETIME_RANGES
 from chronify.time import TimeDataType
 from chronify.time_configs import TimeBaseModel
@@ -49,11 +50,24 @@ class SparkBackend(IbisBackend):
                 SparkSession.builder.master("local")
                 .config("spark.sql.session.timeZone", "UTC")
                 .config("spark.sql.parquet.outputTimestampType", "TIMESTAMP_MICROS")
+                .config("spark.sql.execution.arrow.pyspark.enabled", "true")
                 .getOrCreate()
             )
-        self._validate_session(session)
         self._session = session
+        # Arrow preserves TIMESTAMP instants across pandas boundaries; the
+        # non-Arrow path converts through JVM Calendar and mis-resolves DST
+        # fall-back values (e.g. 2012-11-04 UTC 07:00 collapses into 08:00).
+        session.conf.set("spark.sql.execution.arrow.pyspark.enabled", "true")
+        # ibis.pyspark.connect() forces spark.sql.session.timeZone=UTC as a
+        # side effect. Preserve the caller's tz; UTC is re-pinned locally by
+        # _pinned_utc_session() around operations that require it.
+        tz_key = "spark.sql.session.timeZone"
+        prev_tz = session.conf.get(tz_key, None)
         self._connection = ibis.pyspark.connect(session)
+        if prev_tz is None:
+            session.conf.unset(tz_key)
+        elif session.conf.get(tz_key, None) != prev_tz:
+            session.conf.set(tz_key, prev_tz)
 
     @property
     def name(self) -> str:
@@ -157,11 +171,11 @@ class SparkBackend(IbisBackend):
         Spark's schema has no per-column timezone — only a session-wide
         ``spark.sql.session.timeZone`` — so Ibis reports any Spark
         ``TIMESTAMP`` column as ``Timestamp(timezone=None)`` even though the
-        underlying values are true UTC instants. The session is pinned to UTC
-        (see :meth:`_validate_session`), so casting to
-        ``Timestamp(timezone="UTC")`` only rewrites the type annotation; no
-        value conversion occurs. Downstream consumers (pandas, Arrow) then
-        materialize a tz-aware column.
+        underlying values are true UTC instants. The cast to
+        ``Timestamp(timezone="UTC")`` is intended as a metadata-only
+        re-annotation; this only holds while ``session.timeZone=UTC``, so
+        callers that materialize the result must do so under
+        :meth:`_pinned_utc_session` (as :meth:`read_query` does).
         """
         if not isinstance(config, _DATETIME_RANGES):
             return expr
@@ -173,15 +187,36 @@ class SparkBackend(IbisBackend):
             **{config.time_column: expr[config.time_column].cast(dt.Timestamp(timezone="UTC"))}
         )
 
-    @staticmethod
-    def _validate_session(session: Any) -> None:
-        time_zone = session.conf.get("spark.sql.session.timeZone", None) or "UTC"
-        if time_zone != "UTC":
-            msg = (
-                "SparkBackend requires spark.sql.session.timeZone=UTC to preserve "
-                f"timestamp semantics, got {time_zone!r}."
-            )
-            raise InvalidParameter(msg)
+    def read_query(self, expr: ibis.Table, config: TimeBaseModel) -> pd.DataFrame:
+        """Execute ``expr`` with the session pinned to UTC for materialization.
+
+        The UTC pin ensures the metadata-only cast applied by
+        :meth:`apply_schema_types` is not reinterpreted as a value conversion
+        through the caller's ``session.timeZone``.
+        """
+        with self._pinned_utc_session():
+            return self.execute(self.apply_schema_types(expr, config))
+
+    @contextmanager
+    def _pinned_utc_session(self) -> Generator[None, None, None]:
+        """Temporarily set ``spark.sql.session.timeZone=UTC`` for the block.
+
+        Restores the previous value on exit. Not thread-safe with concurrent
+        users of the same Spark session.
+        """
+        key = "spark.sql.session.timeZone"
+        prev = self._session.conf.get(key, None)
+        if prev == "UTC":
+            yield
+            return
+        self._session.conf.set(key, "UTC")
+        try:
+            yield
+        finally:
+            if prev is None:
+                self._session.conf.unset(key)
+            else:
+                self._session.conf.set(key, prev)
 
 
 def _quote_identifier(identifier: str) -> str:

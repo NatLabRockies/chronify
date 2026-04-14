@@ -14,14 +14,6 @@ $ tar -xzf spark-4.0.1-bin-hadoop3.tgz
 $ export SPARK_HOME=$(pwd)/spark-4.0.1-bin-hadoop3
 ```
 
-Start a Thrift server. This allows JDBC clients to send SQL queries to an in-process Spark cluster
-running in local mode.
-```
-$ $SPARK_HOME/sbin/start-thriftserver.sh --master=spark://$(hostname):7077
-```
-
-The URL to connect to this server is `hive://localhost:10000/default`
-
 ## Installation on an HPC
 The chronify development team uses this
 [package](https://github.com/NatLabRockies/sparkctl) to run Spark on NLR's HPC.

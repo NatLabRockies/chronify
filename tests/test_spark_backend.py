@@ -6,7 +6,6 @@ import os
 import pandas as pd
 import pytest
 
-from chronify.exceptions import InvalidParameter
 from chronify.ibis.spark_backend import SparkBackend
 from chronify.models import TableSchema
 from chronify.store import Store
@@ -408,16 +407,22 @@ def test_spark_dispose(tmp_path: Path) -> None:
     backend.dispose()
 
 
-def test_spark_backend_rejects_non_utc_session() -> None:
+def test_spark_backend_accepts_non_utc_session() -> None:
+    """Non-UTC session tz is allowed; UTC is pinned only for read_query."""
     _require_java_home()
     pyspark = pytest.importorskip("pyspark.sql")
-    session = (
-        pyspark.SparkSession.builder.master("local")
-        .config("spark.sql.session.timeZone", "America/Denver")
-        .getOrCreate()
-    )
+    session = pyspark.SparkSession.builder.master("local").getOrCreate()
+    prev_tz = session.conf.get("spark.sql.session.timeZone", None)
+    session.conf.set("spark.sql.session.timeZone", "America/Denver")
     try:
-        with pytest.raises(InvalidParameter, match="spark.sql.session.timeZone=UTC"):
-            SparkBackend(session=session)
+        backend = SparkBackend(session=session, owns_session=False)
+        assert session.conf.get("spark.sql.session.timeZone") == "America/Denver"
+        with backend._pinned_utc_session():
+            assert session.conf.get("spark.sql.session.timeZone") == "UTC"
+        assert session.conf.get("spark.sql.session.timeZone") == "America/Denver"
+        backend.dispose()
     finally:
-        session.stop()
+        if prev_tz is None:
+            session.conf.unset("spark.sql.session.timeZone")
+        else:
+            session.conf.set("spark.sql.session.timeZone", prev_tz)
