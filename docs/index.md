@@ -4,7 +4,7 @@ This package implements validation, mapping, and storage of time series data in 
 Python-based modeling packages.
 
 ## Features
-- Stores time series data in any database supported by SQLAlchemy.
+- Stores time series data in any database supported by Ibis (DuckDB, SQLite, and Spark).
 - Supports data ingestion in a variety of file formats and configurations.
 - Supports efficient retrieval of time series through SQL queries.
 - Validates consistency of timestamps and resolution.
@@ -23,24 +23,12 @@ Python-based modeling packages.
 ```
 
 ## Supported Backends
-While chronify should work with any database supported by SQLAlchemy, it has been tested with
-the following:
+Chronify uses [Ibis](https://ibis-project.org) for all database operations. The following
+backends are supported:
 
 - DuckDB (default)
 - SQLite
-- Apache Spark through Apache Thrift Server
-
-DuckDB and SQLite are fully supported.
-
-Because of limitations in the backend software, chronify functionality with Spark is limited to
-the following:
-
-- Create a view into an existing Parquet file (or directory).
-- Perform time series checks.
-- Map between time configurations.
-- Write output data to Parquet files.
-
-There is no support for creating tables and ingesting data with Spark.
+- Apache Spark (via PySpark)
 
 ## How to use this guide
 - Refer to [How Tos](#how-tos-page) for step-by-step instructions for creating store and ingesting data.

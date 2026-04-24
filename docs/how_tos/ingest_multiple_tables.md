@@ -1,7 +1,6 @@
 # How to Ingest Multiple Tables Efficiently
 
 There are a few important considerations when ingesting many tables:
-- Use one database connection.
 - Avoid loading all tables into memory at once, if possible.
 - Ensure additions are atomic. If anything fails, the final state should be the same as the initial
 state.
@@ -48,25 +47,23 @@ dst_schema = TableSchema(
 Chronify will manage the database connection and errors.
 ```python
 store.ingest_from_csvs(
-    src_schema,
-    dst_schema,
     (
         "/path/to/file1.csv",
         "/path/to/file2.csv",
         "/path/to/file3.csv",
     ),
- )
+    src_schema,
+    dst_schema,
+)
 
 ```
 
 ## Self-Managed
-Open one connection to the database for the duration of your additions. Handle errors.
+Wrap the additions in a backend transaction. Any tables or views created within the block are
+automatically dropped if an exception is raised.
 ```python
-with store.engine.connect() as conn:
-    try:
-        store.ingest_from_csv(src_schema, dst_schema, "/path/to/file1.csv")
-        store.ingest_from_csv(src_schema, dst_schema, "/path/to/file2.csv")
-        store.ingest_from_csv(src_schema, dst_schema, "/path/to/file3.csv")
-    except Exception:
-        conn.rollback()
+with store.backend.transaction():
+    store.ingest_from_csv("/path/to/file1.csv", src_schema, dst_schema)
+    store.ingest_from_csv("/path/to/file2.csv", src_schema, dst_schema)
+    store.ingest_from_csv("/path/to/file3.csv", src_schema, dst_schema)
 ```

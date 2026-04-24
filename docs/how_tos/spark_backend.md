@@ -62,9 +62,18 @@ schema = TableSchema(
 
 ```python
 from chronify import Store
+from chronify.ibis.spark_backend import SparkBackend
 
-store = Store.create_new_hive_store("hive://localhost:10000/default")
-store.create_view_from_parquet("data.parquet")
+store = Store(backend=SparkBackend())
+store.create_view_from_parquet("data.parquet", schema)
+```
+
+Alternatively, pass a pre-configured PySpark session:
+```python
+from pyspark.sql import SparkSession
+
+session = SparkSession.builder.master("local").getOrCreate()
+store = Store(backend=SparkBackend(session=session))
 ```
 
 Verify the data:

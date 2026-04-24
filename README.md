@@ -16,7 +16,7 @@ To use DuckDB or SQLite as the backend:
 $ pip install chronify
 ```
 
-To use Apache Spark via Apache Thrift Server as the backend:
+To use Apache Spark as the backend:
 ```
 $ pip install "chronify[spark]"
 ```
