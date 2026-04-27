@@ -131,6 +131,27 @@ class SparkBackend(IbisBackend):
         self._connection.create_view(name, self._connection.read_parquet(path))
         return self.table(name), ObjectType.VIEW
 
+    def write_parquet(
+        self,
+        expr: ibis.Table,
+        path: str,
+        partition_by: list[str] | None = None,
+    ) -> None:
+        """Write to Parquet, using PySpark's writer directly when partitioning.
+
+        ibis-pyspark's ``to_parquet`` passes ``partition_by`` through as a
+        ``DataFrameWriter.save`` kwarg, but PySpark's writer expects the
+        camel-cased ``partitionBy`` (snake_case is silently ignored as an
+        unknown option). Fall back to the unpartitioned ibis path when no
+        partition columns are given.
+        """
+        if not partition_by:
+            self._connection.to_parquet(expr, path)
+            return
+        sql = self._connection.compile(expr)
+        df = self._session.sql(sql)
+        df.write.partitionBy(*partition_by).parquet(path)
+
     def execute_sql(self, query: str) -> None:
         logger.trace("execute_sql: {}", query)
         self._session.sql(query)
