@@ -1099,6 +1099,83 @@ def test_map_table_preserves_existing_parquet_on_failure(tmp_path, monkeypatch):
     assert leftover == []
 
 
+def test_map_table_preserves_existing_parquet_on_promotion_failure(tmp_path, monkeypatch):
+    """If the staging→target rename fails after the transaction commits, the
+    pre-existing target must survive. Regression for an earlier
+    delete-then-rename window where a crash between the two operations
+    would leave the user with neither the old nor the new output.
+    """
+    store = Store.create_in_memory_db()
+    year = 2020
+    length = 24
+    src_schema = TableSchema(
+        name="src_promo_fail",
+        value_column="value",
+        time_array_id_columns=["id"],
+        time_config=DatetimeRange(
+            start=datetime(year, 1, 1),
+            resolution=timedelta(hours=1),
+            length=length,
+            interval_type=TimeIntervalType.PERIOD_BEGINNING,
+            time_column="timestamp",
+        ),
+    )
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.date_range(datetime(year, 1, 1), periods=length, freq="h"),
+            "id": 1,
+            "value": list(range(length)),
+        }
+    )
+    store.ingest_table(df, src_schema)
+
+    output_file = tmp_path / "out.parquet"
+    sentinel = b"PRE-EXISTING-DO-NOT-DESTROY"
+    output_file.write_bytes(sentinel)
+
+    dst_schema = TableSchema(
+        name="dst_promo_fail",
+        value_column="value",
+        time_array_id_columns=["id"],
+        time_config=DatetimeRange(
+            start=datetime(year, 1, 1, 1),
+            resolution=timedelta(hours=1),
+            length=length,
+            interval_type=TimeIntervalType.PERIOD_ENDING,
+            time_column="timestamp",
+        ),
+    )
+
+    # The promotion sequence is: target→backup, then staging→target, then
+    # delete backup. Inject a failure on the second Path.replace so we
+    # exercise the restore path.
+    real_replace = Path.replace
+    n = [0]
+
+    def _flaky_replace(self, target):
+        n[0] += 1
+        if n[0] == 2:
+            msg = "simulated promotion failure"
+            raise OSError(msg)
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", _flaky_replace)
+
+    with pytest.raises(OSError, match="simulated"):
+        store.map_table_time_config(
+            src_schema.name,
+            dst_schema,
+            output_file=output_file,
+        )
+
+    # Original content must survive — restored from the backup after the
+    # second rename failed.
+    assert output_file.read_bytes() == sentinel
+    # And no debris left in the directory.
+    leftover = sorted(p.name for p in tmp_path.iterdir() if p.name != output_file.name)
+    assert leftover == []
+
+
 def test_map_table_cleanup_handles_directory_staging(tmp_path, monkeypatch):
     """Spark writes parquet as a directory, not a file. Cleanup of a failed
     map must use a directory-safe delete instead of unlink()."""

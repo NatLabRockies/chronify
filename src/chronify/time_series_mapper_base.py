@@ -143,14 +143,31 @@ def apply_mapping(  # noqa: C901
             elif created_tmp_obj is ObjectType.VIEW:
                 backend.drop_view(to_schema.name)
         # Promote the staged parquet only after the transaction commits.
-        # The staging output may be a file (DuckDB) or a directory (Spark
-        # parquet writes are always directories), so explicitly remove any
-        # existing target first — ``Path.replace`` cannot overwrite a
-        # non-empty directory.
+        # When the target already exists, do a backup-rename-replace dance
+        # rather than a delete-then-rename so the original is preserved if
+        # anything goes wrong (or the process crashes) between the two
+        # renames. ``Path.replace`` is atomic per call but cannot overwrite
+        # a non-empty directory, so we always rename the existing target
+        # aside first regardless of file vs. directory shape.
         if staging_path is not None:
             assert output_path is not None
-            delete_if_exists(output_path)
-            staging_path.replace(output_path)
+            if output_path.exists():
+                backup_path = output_path.with_name(
+                    f".{output_path.name}.backup.{uuid.uuid4().hex[:8]}"
+                )
+                output_path.replace(backup_path)
+                try:
+                    staging_path.replace(output_path)
+                except Exception:
+                    # Restore the original; the user keeps their pre-existing
+                    # output. If this also fails, the chained exception
+                    # surfaces both errors and the backup remains on disk
+                    # for manual recovery.
+                    backup_path.replace(output_path)
+                    raise
+                delete_if_exists(backup_path)
+            else:
+                staging_path.replace(output_path)
     except Exception:
         logger.exception(
             "Mapping failed for {} -> {}. Cleaning up.", from_schema.name, to_schema.name
