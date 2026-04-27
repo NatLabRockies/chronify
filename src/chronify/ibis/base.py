@@ -191,6 +191,8 @@ class IbisBackend(ABC):
     DML auto-commits).
     """
 
+    _in_transaction: bool
+
     @property
     @abstractmethod
     def name(self) -> str:

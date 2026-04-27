@@ -200,7 +200,7 @@ class SQLiteBackend(IbisBackend):
         # The real connection is held aside and used directly for BEGIN /
         # COMMIT / ROLLBACK.
         self._real_con = real
-        self._connection.con = _NoCommitProxy(real)  # type: ignore[assignment]
+        self._connection.con = _NoCommitProxy(real)
         self._in_transaction = True
 
     def _commit_transaction(self) -> None:
