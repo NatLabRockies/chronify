@@ -1176,6 +1176,75 @@ def test_map_table_preserves_existing_parquet_on_promotion_failure(tmp_path, mon
     assert leftover == []
 
 
+def test_map_table_succeeds_when_backup_cleanup_fails(tmp_path, monkeypatch):
+    """A failure to remove the post-promotion backup is cosmetic debris; the
+    mapping must still succeed and the schema must still be registered.
+
+    Reviewer regression: previously a backup-cleanup OSError caused
+    ``apply_mapping`` to re-raise, so ``map_table_time_config`` skipped its
+    ``add_schema`` call and the user was left with a new parquet on disk
+    that the store didn't know about.
+    """
+    store = Store.create_in_memory_db()
+    year = 2020
+    length = 24
+    src_schema = TableSchema(
+        name="src_backup_fail",
+        value_column="value",
+        time_array_id_columns=["id"],
+        time_config=DatetimeRange(
+            start=datetime(year, 1, 1),
+            resolution=timedelta(hours=1),
+            length=length,
+            interval_type=TimeIntervalType.PERIOD_BEGINNING,
+            time_column="timestamp",
+        ),
+    )
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.date_range(datetime(year, 1, 1), periods=length, freq="h"),
+            "id": 1,
+            "value": list(range(length)),
+        }
+    )
+    store.ingest_table(df, src_schema)
+
+    output_file = tmp_path / "out.parquet"
+    output_file.write_bytes(b"ORIGINAL")
+
+    dst_schema = TableSchema(
+        name="dst_backup_fail",
+        value_column="value",
+        time_array_id_columns=["id"],
+        time_config=DatetimeRange(
+            start=datetime(year, 1, 1, 1),
+            resolution=timedelta(hours=1),
+            length=length,
+            interval_type=TimeIntervalType.PERIOD_ENDING,
+            time_column="timestamp",
+        ),
+    )
+
+    real_delete = time_series_mapper_base.delete_if_exists
+
+    def _fail_on_backup(path):
+        if ".backup." in path.name:
+            msg = "simulated backup cleanup failure"
+            raise OSError(msg)
+        return real_delete(path)
+
+    monkeypatch.setattr(time_series_mapper_base, "delete_if_exists", _fail_on_backup)
+
+    # Mapping must succeed despite the backup-cleanup OSError.
+    store.map_table_time_config(src_schema.name, dst_schema, output_file=output_file)
+
+    # New parquet content is in place.
+    new = pd.read_parquet(output_file)
+    assert len(new) == length
+    # And the schema is registered, so the store and on-disk state agree.
+    assert store._schema_mgr.get_schema(dst_schema.name).name == dst_schema.name
+
+
 def test_map_table_cleanup_handles_directory_staging(tmp_path, monkeypatch):
     """Spark writes parquet as a directory, not a file. Cleanup of a failed
     map must use a directory-safe delete instead of unlink()."""

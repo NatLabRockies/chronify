@@ -165,7 +165,21 @@ def apply_mapping(  # noqa: C901
                     # for manual recovery.
                     backup_path.replace(output_path)
                     raise
-                delete_if_exists(backup_path)
+                # Promotion succeeded — the new output is observable. A
+                # failure to remove the backup at this point is non-fatal
+                # debris; surfacing it would cause the caller (e.g.
+                # ``Store.map_table_time_config``) to skip the post-success
+                # schema registration and leave the store metadata
+                # inconsistent with the on-disk parquet.
+                try:
+                    delete_if_exists(backup_path)
+                except Exception:
+                    logger.warning(
+                        "Promoted output to {} but failed to remove backup at {}; "
+                        "this is cosmetic debris and may be deleted manually.",
+                        output_path,
+                        backup_path,
+                    )
             else:
                 staging_path.replace(output_path)
     except Exception:
