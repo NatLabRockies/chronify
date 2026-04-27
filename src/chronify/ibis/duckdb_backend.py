@@ -38,6 +38,7 @@ class DuckDBBackend(IbisBackend):
             msg = f"{database=} and {connection=} cannot both be set"
             raise ConflictingInputsError(msg)
 
+        self._in_transaction = False
         self._owns_connection = connection is None
         if connection is None:
             db = str(database)

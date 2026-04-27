@@ -187,18 +187,33 @@ def apply_mapping(  # noqa: C901
             "Mapping failed for {} -> {}. Cleaning up.", from_schema.name, to_schema.name
         )
         # Idempotent cleanup. On DuckDB/SQLite the rollback already dropped
-        # these objects (has_table returns False); on Spark it didn't.
-        if backend.has_table(mapping_schema.name):
-            backend.drop_table(mapping_schema.name)
-        if backend.has_table(to_schema.name):
-            if created_tmp_obj is ObjectType.VIEW:
-                backend.drop_view(to_schema.name)
-            else:
-                backend.drop_table(to_schema.name)
+        # these objects (has_table returns False); on Spark it didn't. Each
+        # step is independently guarded so a Spark connectivity failure (or
+        # similar) here cannot mask the original mapping exception.
+        try:
+            if backend.has_table(mapping_schema.name):
+                backend.drop_table(mapping_schema.name)
+        except Exception:
+            logger.exception(
+                "Failed to drop mapping table {} during cleanup.", mapping_schema.name
+            )
+        try:
+            if backend.has_table(to_schema.name):
+                if created_tmp_obj is ObjectType.VIEW:
+                    backend.drop_view(to_schema.name)
+                else:
+                    backend.drop_table(to_schema.name)
+        except Exception:
+            logger.exception("Failed to drop result table/view {} during cleanup.", to_schema.name)
         # Remove the staging output (file or directory); the original target
         # is untouched because the rename never ran.
         if staging_path is not None:
-            delete_if_exists(staging_path)
+            try:
+                delete_if_exists(staging_path)
+            except Exception:
+                logger.exception(
+                    "Failed to remove staging output {} during cleanup.", staging_path
+                )
         raise
 
 

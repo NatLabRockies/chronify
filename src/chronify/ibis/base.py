@@ -183,13 +183,13 @@ class ObjectType(StrEnum):
 
 
 class IbisBackend(ABC):
-    """Abstract base class defining the interface for Ibis database backends."""
+    """Abstract base class defining the interface for Ibis database backends.
 
-    # Set while inside transaction(). Used for nesting (inner transaction()
-    # calls become passthroughs) and, on SQLite, by ``_commit_if_needed`` to
-    # decide whether DML auto-commits. Subclasses may shadow with an
-    # instance attribute.
-    _in_transaction: bool = False
+    Subclasses must set ``self._in_transaction = False`` in ``__init__``.
+    The flag is read by :meth:`transaction` (to make inner blocks
+    passthroughs) and on SQLite by ``_commit_if_needed`` (to decide whether
+    DML auto-commits).
+    """
 
     @property
     @abstractmethod

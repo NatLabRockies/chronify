@@ -210,6 +210,32 @@ def test_ingest_multiple_tables_error(iter_stores_by_engine: Store, multiple_tab
     assert df.equals(tables[1])
 
 
+def test_ingest_cleanup_failure_does_not_mask_original_error(monkeypatch, multiple_tables):
+    """A cleanup-side failure during post-ingest rollback must not replace
+    the user-visible ingest error. Regression: a Spark connectivity blip
+    inside ``drop_table`` would otherwise hide the InvalidTable that
+    originally caused the rollback.
+    """
+    store = Store.create_in_memory_db()
+    tables, schema = multiple_tables
+    tables[1].loc[8783] = (tables[1].loc[8783]["timestamp"], 0.1, 99)
+
+    real_drop = store._backend.drop_table
+
+    def _exploding_drop(name):
+        if name == schema.name:
+            msg = "simulated cleanup failure"
+            raise RuntimeError(msg)
+        return real_drop(name)
+
+    monkeypatch.setattr(store._backend, "drop_table", _exploding_drop)
+
+    # The user must see the InvalidTable from validation, not the RuntimeError
+    # from cleanup.
+    with pytest.raises(InvalidTable):
+        store.ingest_tables(tables, schema)
+
+
 @pytest.mark.parametrize("use_pandas", [False, True])
 def test_ingest_pivoted_table(iter_stores_by_engine: Store, generators_schema, use_pandas: bool):
     import ibis

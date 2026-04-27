@@ -44,6 +44,7 @@ class SparkBackend(IbisBackend):
             msg = "pyspark is required for SparkBackend. Install with: pip install chronify[spark]"
             raise ImportError(msg) from e
 
+        self._in_transaction = False
         self._owns_session = session is None if owns_session is None else owns_session
         if session is None:
             session = (

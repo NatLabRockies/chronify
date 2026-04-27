@@ -244,8 +244,11 @@ class Store:
         """Ingest data into the table specified by schema. If the table does not exist,
         create it. This is faster than calling :meth:`ingest_from_csv` many times.
         Each file is loaded into memory one at a time.
-        If any error occurs, all added data will be removed and the state of the database will
-        be the same as the original state.
+
+        On DuckDB and SQLite, a failure rolls back every change made by this call
+        and the database state is restored. On Spark, partial appends to a
+        pre-existing table cannot be rolled back; only the case where this call
+        creates a new table is fully cleaned up on failure.
 
         Parameters
         ----------
@@ -275,10 +278,9 @@ class Store:
             with self._backend.transaction():
                 created_table = self._ingest_from_csvs(paths, src_schema, dst_schema)
         except Exception:
-            if not table_existed and self._backend.has_table(dst_schema.name):
-                self._backend.drop_table(dst_schema.name)
-            if not table_existed:
-                self._schema_mgr.remove_schema(dst_schema.name)
+            _safe_cleanup_after_ingest_error(
+                self._backend, self._schema_mgr, dst_schema.name, table_existed
+            )
             raise
         return created_table
 
@@ -402,8 +404,11 @@ class Store:
 
         If the table does not exist, create it. Unpivot the data before ingesting it.
         This is faster than calling :meth:`ingest_pivoted_table` many times.
-        If any error occurs, all added data will be removed and the state of the database will
-        be the same as the original state.
+
+        On DuckDB and SQLite, a failure rolls back every change made by this call
+        and the database state is restored. On Spark, partial appends to a
+        pre-existing table cannot be rolled back; only the case where this call
+        creates a new table is fully cleaned up on failure.
 
         Parameters
         ----------
@@ -428,10 +433,9 @@ class Store:
             with self._backend.transaction():
                 created_table = self._ingest_pivoted_tables(data, src_schema, dst_schema)
         except Exception:
-            if not table_existed and self._backend.has_table(dst_schema.name):
-                self._backend.drop_table(dst_schema.name)
-            if not table_existed:
-                self._schema_mgr.remove_schema(dst_schema.name)
+            _safe_cleanup_after_ingest_error(
+                self._backend, self._schema_mgr, dst_schema.name, table_existed
+            )
             raise
         return created_table
 
@@ -534,6 +538,11 @@ class Store:
         This offers significant performance advantages over calling :meth:`ingest_table` many
         times.
 
+        On DuckDB and SQLite, a failure rolls back every change made by this call
+        and the database state is restored. On Spark, partial appends to a
+        pre-existing table cannot be rolled back; only the case where this call
+        creates a new table is fully cleaned up on failure.
+
         Parameters
         ----------
         data
@@ -564,10 +573,9 @@ class Store:
             with self._backend.transaction():
                 created_table = self._ingest_tables(data, schema, **kwargs)
         except Exception:
-            if not table_existed and self._backend.has_table(schema.name):
-                self._backend.drop_table(schema.name)
-            if not table_existed:
-                self._schema_mgr.remove_schema(schema.name)
+            _safe_cleanup_after_ingest_error(
+                self._backend, self._schema_mgr, schema.name, table_existed
+            )
             raise
         return created_table
 
@@ -1223,3 +1231,30 @@ def check_columns(
         cols = " ".join(sorted(diff))
         msg = f"These columns are defined in the schema but not present in the table: {cols}"
         raise InvalidTable(msg)
+
+
+def _safe_cleanup_after_ingest_error(
+    backend: IbisBackend,
+    schema_mgr: SchemaManager,
+    name: str,
+    table_existed: bool,
+) -> None:
+    """Best-effort post-failure cleanup that never replaces the original error.
+
+    Caller invokes this from inside an ``except:`` block and follows it with a
+    bare ``raise``. Any exception raised here is logged and swallowed so the
+    original exception is what propagates — otherwise a Spark connectivity
+    failure during ``drop_table`` would mask the real cause of the ingest
+    error and leave the user debugging the wrong thing.
+    """
+    if table_existed:
+        return
+    try:
+        if backend.has_table(name):
+            backend.drop_table(name)
+        schema_mgr.remove_schema(name)
+    except Exception:
+        logger.exception(
+            "Cleanup after failed ingest of {} did not complete; original error follows.",
+            name,
+        )
