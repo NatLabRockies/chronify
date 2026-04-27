@@ -3,8 +3,8 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
-from sqlalchemy import Engine, MetaData
 
+from chronify.ibis.base import IbisBackend
 from chronify.models import TableSchema, MappingTableSchema
 from chronify.exceptions import InvalidParameter, ConflictingInputsError
 from chronify.time_series_mapper_base import TimeSeriesMapperBase, apply_mapping
@@ -22,16 +22,13 @@ logger = logging.getLogger(__name__)
 class MapperDatetimeToDatetime(TimeSeriesMapperBase):
     def __init__(
         self,
-        engine: Engine,
-        metadata: MetaData,
+        backend: IbisBackend,
         from_schema: TableSchema,
         to_schema: TableSchema,
         data_adjustment: Optional[TimeBasedDataAdjustment] = None,
         wrap_time_allowed: bool = False,
     ) -> None:
-        super().__init__(
-            engine, metadata, from_schema, to_schema, data_adjustment, wrap_time_allowed
-        )
+        super().__init__(backend, from_schema, to_schema, data_adjustment, wrap_time_allowed)
         if self._from_schema == self._to_schema and self._data_adjustment is None:
             msg = f"from_schema is the same as to_schema and no data_adjustment, nothing to do.\n{self._from_schema}"
             logger.info(msg)
@@ -65,7 +62,6 @@ class MapperDatetimeToDatetime(TimeSeriesMapperBase):
 
     def map_time(
         self,
-        scratch_dir: Optional[Path] = None,
         output_file: Optional[Path] = None,
         check_mapped_timestamps: bool = False,
     ) -> None:
@@ -77,14 +73,11 @@ class MapperDatetimeToDatetime(TimeSeriesMapperBase):
             mapping_schema,
             self._from_schema,
             self._to_schema,
-            self._engine,
-            self._metadata,
+            self._backend,
             self._data_adjustment,
-            scratch_dir=scratch_dir,
             output_file=output_file,
             check_mapped_timestamps=check_mapped_timestamps,
         )
-        # TODO - add handling for changing resolution - Issue #30
 
     def _create_mapping(self) -> tuple[pd.DataFrame, MappingTableSchema]:
         """Create mapping dataframe
@@ -98,20 +91,15 @@ class MapperDatetimeToDatetime(TimeSeriesMapperBase):
         ).list_timestamps()
 
         ser_from = pd.Series(from_time_data)
-        # If from_tz or to_tz is naive, use tz_localize
         fm_tz = self._from_time_config.start.tzinfo
         to_tz = self._to_time_config.start.tzinfo
         match (fm_tz is None, to_tz is None):
             case (True, False):
-                # get standard time zone of to_tz
                 to_tz_std = get_standard_time_zone(to_tz)
-                # tz-naive time does not have skips/dups, so always localize in std tz first
                 ser_from = ser_from.dt.tz_localize(to_tz_std).dt.tz_convert(to_tz)
                 pass
             case (False, True):
-                # get standard time zone of fm_tz
                 fm_tz_std = get_standard_time_zone(fm_tz)
-                # convert to standard time zone of fm_tz before making it tz-naive
                 ser_from = ser_from.dt.tz_convert(fm_tz_std).dt.tz_localize(to_tz)
                 pass
         match (self._adjust_interval, self._wrap_time_allowed):

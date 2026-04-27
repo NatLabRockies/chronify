@@ -1,26 +1,18 @@
 import abc
-from functools import reduce
-from operator import and_
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
 import pandas as pd
 from loguru import logger
-from sqlalchemy import Engine, MetaData, Table, select, text, func
-from chronify.hive_functions import create_materialized_view
 
-from chronify.sqlalchemy.functions import (
-    create_view_from_parquet,
-    write_database,
-    write_query_to_parquet,
-)
+from chronify.ibis.base import IbisBackend, ObjectType
 from chronify.models import TableSchema, MappingTableSchema
 from chronify.exceptions import ConflictingInputsError, InvalidOperation
-from chronify.utils.sqlalchemy_table import create_table
 from chronify.time_series_checker import check_timestamps
 from chronify.time import TimeIntervalType, ResamplingOperationType, AggregationType
 from chronify.time_configs import TimeBasedDataAdjustment
-from chronify.utils.path_utils import to_path
+from chronify.utils.path_utils import check_overwrite, delete_if_exists, to_path
 
 
 class TimeSeriesMapperBase(abc.ABC):
@@ -28,19 +20,16 @@ class TimeSeriesMapperBase(abc.ABC):
 
     def __init__(
         self,
-        engine: Engine,
-        metadata: MetaData,
+        backend: IbisBackend,
         from_schema: TableSchema,
         to_schema: TableSchema,
         data_adjustment: Optional[TimeBasedDataAdjustment] = None,
         wrap_time_allowed: bool = False,
         resampling_operation: Optional[ResamplingOperationType] = None,
     ) -> None:
-        self._engine = engine
-        self._metadata = metadata
+        self._backend = backend
         self._from_schema = from_schema
         self._to_schema = to_schema
-        # data_adjustment is used in mapping creation and time check of mapped time
         self._data_adjustment = data_adjustment or TimeBasedDataAdjustment()
         self._wrap_time_allowed = wrap_time_allowed
         self._adjust_interval = (
@@ -58,7 +47,7 @@ class TimeSeriesMapperBase(abc.ABC):
         available_cols = (
             self._from_schema.list_columns() + self._to_schema.time_config.list_time_columns()
         )
-        final_cols = self._to_schema.list_columns()  # does not include pass-thru columns
+        final_cols = self._to_schema.list_columns()
         if diff := set(final_cols) - set(available_cols):
             msg = f"Source table {self._from_schema.name} cannot produce the columns: {diff}"
             raise ConflictingInputsError(msg)
@@ -86,150 +75,229 @@ class TimeSeriesMapperBase(abc.ABC):
         """Convert time columns with from_schema to to_schema configuration."""
 
 
-def apply_mapping(
+def apply_mapping(  # noqa: C901
     df_mapping: pd.DataFrame,
     mapping_schema: MappingTableSchema,
     from_schema: TableSchema,
     to_schema: TableSchema,
-    engine: Engine,
-    metadata: MetaData,
+    backend: IbisBackend,
     data_adjustment: TimeBasedDataAdjustment,
     resampling_operation: Optional[ResamplingOperationType] = None,
-    scratch_dir: Optional[Path] = None,
     output_file: Optional[Path] = None,
     check_mapped_timestamps: bool = False,
 ) -> None:
+    """Apply mapping to create result table.
+
+    The whole multi-step DDL — write the mapping table, create the result
+    table (or write the parquet file), optionally create a temp view from
+    the parquet, run timestamp checks — runs inside a single
+    ``backend.transaction()``. On DuckDB and SQLite, a failure rolls back
+    every DB-side artifact atomically. Spark has no rollback, so the except
+    path also handles cleanup there.
+
+    When ``output_file`` is set, the parquet write goes to a uniquely-named
+    staging path inside the transaction, then atomically renames over the
+    target only after the transaction commits. A failure leaves any
+    pre-existing target file untouched.
     """
-    Apply mapping to create result table with process to clean up and roll back if checks fail
-    """
-    with engine.begin() as conn:
-        write_database(
-            df_mapping,
-            conn,
-            mapping_schema.name,
-            mapping_schema.time_configs,
-            if_table_exists="fail",
-            scratch_dir=scratch_dir,
-        )
-    metadata.reflect(engine, views=True)
-    created_tmp_view = False
+    output_path = to_path(output_file) if output_file is not None else None
+    staging_path = (
+        output_path.with_name(f".{output_path.name}.staging.{uuid.uuid4().hex[:8]}")
+        if output_path is not None
+        else None
+    )
+    created_tmp_obj: Optional[ObjectType] = None
     try:
-        _apply_mapping(
-            mapping_schema.name,
-            from_schema,
-            to_schema,
-            engine,
-            metadata,
-            resampling_operation=resampling_operation,
-            scratch_dir=scratch_dir,
-            output_file=output_file,
-        )
-        if check_mapped_timestamps:
-            if output_file is not None:
-                output_file = to_path(output_file)
-                with engine.begin() as conn:
-                    create_view_from_parquet(conn, to_schema.name, output_file)
-                metadata.reflect(engine, views=True)
-                created_tmp_view = True
-            mapped_table = Table(to_schema.name, metadata)
-            with engine.connect() as conn:
+        with backend.transaction():
+            backend.write_table(
+                df_mapping,
+                mapping_schema.name,
+                mapping_schema.time_configs,
+                if_exists="fail",
+            )
+            _apply_mapping(
+                mapping_schema.name,
+                from_schema,
+                to_schema,
+                backend,
+                resampling_operation=resampling_operation,
+                output_file=staging_path,
+            )
+            if check_mapped_timestamps:
+                if staging_path is not None:
+                    _, created_tmp_obj = backend.create_view_from_parquet(
+                        str(staging_path), to_schema.name
+                    )
+                check_timestamps(
+                    backend,
+                    to_schema.name,
+                    to_schema,
+                    leap_day_adjustment=data_adjustment.leap_day_adjustment,
+                )
+            # Drop temp artifacts inside the transaction so the commit doesn't
+            # retain them. The mapping table is always temp; the parquet view
+            # is temp only when we created it for the timestamp check.
+            backend.drop_table(mapping_schema.name)
+            if created_tmp_obj is ObjectType.TABLE:
+                backend.drop_table(to_schema.name)
+            elif created_tmp_obj is ObjectType.VIEW:
+                backend.drop_view(to_schema.name)
+        # Promote the staged parquet only after the transaction commits.
+        # When the target already exists, do a backup-rename-replace dance
+        # rather than a delete-then-rename so the original is preserved if
+        # anything goes wrong (or the process crashes) between the two
+        # renames. ``Path.replace`` is atomic per call but cannot overwrite
+        # a non-empty directory, so we always rename the existing target
+        # aside first regardless of file vs. directory shape.
+        if staging_path is not None:
+            assert output_path is not None
+            if output_path.exists():
+                backup_path = output_path.with_name(
+                    f".{output_path.name}.backup.{uuid.uuid4().hex[:8]}"
+                )
+                output_path.replace(backup_path)
                 try:
-                    check_timestamps(
-                        conn,
-                        mapped_table,
-                        to_schema,
-                        leap_day_adjustment=data_adjustment.leap_day_adjustment,
-                    )
+                    staging_path.replace(output_path)
                 except Exception:
-                    logger.exception(
-                        "check_timestamps failed on mapped table {}. Drop it",
-                        to_schema.name,
-                    )
-                    if output_file is None:
-                        table_type = "VIEW" if engine.name == "hive" else "TABLE"
-                        conn.execute(text(f"DROP {table_type} {to_schema.name}"))
+                    # Restore the original; the user keeps their pre-existing
+                    # output. If this also fails, the chained exception
+                    # surfaces both errors and the backup remains on disk
+                    # for manual recovery.
+                    backup_path.replace(output_path)
                     raise
-    finally:
-        with engine.begin() as conn:
-            table_type = "view" if engine.name == "hive" else "table"
-            conn.execute(text(f"DROP {table_type} IF EXISTS {mapping_schema.name}"))
+                # Promotion succeeded — the new output is observable. A
+                # failure to remove the backup at this point is non-fatal
+                # debris; surfacing it would cause the caller (e.g.
+                # ``Store.map_table_time_config``) to skip the post-success
+                # schema registration and leave the store metadata
+                # inconsistent with the on-disk parquet.
+                try:
+                    delete_if_exists(backup_path)
+                except Exception:
+                    logger.warning(
+                        "Promoted output to {} but failed to remove backup at {}; "
+                        "this is cosmetic debris and may be deleted manually.",
+                        output_path,
+                        backup_path,
+                    )
+            else:
+                staging_path.replace(output_path)
+    except Exception:
+        logger.exception(
+            "Mapping failed for {} -> {}. Cleaning up.", from_schema.name, to_schema.name
+        )
+        # Idempotent cleanup. On DuckDB/SQLite the rollback already dropped
+        # these objects (has_table returns False); on Spark it didn't. Each
+        # step is independently guarded so a Spark connectivity failure (or
+        # similar) here cannot mask the original mapping exception.
+        try:
+            if backend.has_table(mapping_schema.name):
+                backend.drop_table(mapping_schema.name)
+        except Exception:
+            logger.exception(
+                "Failed to drop mapping table {} during cleanup.", mapping_schema.name
+            )
+        try:
+            if backend.has_table(to_schema.name):
+                if created_tmp_obj is ObjectType.VIEW:
+                    backend.drop_view(to_schema.name)
+                else:
+                    backend.drop_table(to_schema.name)
+        except Exception:
+            logger.exception("Failed to drop result table/view {} during cleanup.", to_schema.name)
+        # Remove the staging output (file or directory); the original target
+        # is untouched because the rename never ran.
+        if staging_path is not None:
+            try:
+                delete_if_exists(staging_path)
+            except Exception:
+                logger.exception(
+                    "Failed to remove staging output {} during cleanup.", staging_path
+                )
+        raise
 
-            if created_tmp_view:
-                conn.execute(text(f"DROP VIEW IF EXISTS {to_schema.name}"))
-                metadata.remove(Table(to_schema.name, metadata))
 
-        metadata.remove(Table(mapping_schema.name, metadata))
-        metadata.reflect(engine, views=True)
-
-
-def _apply_mapping(
+def _apply_mapping(  # noqa: C901
     mapping_table_name: str,
     from_schema: TableSchema,
     to_schema: TableSchema,
-    engine: Engine,
-    metadata: MetaData,
+    backend: IbisBackend,
     resampling_operation: Optional[ResamplingOperationType] = None,
-    scratch_dir: Optional[Path] = None,
     output_file: Optional[Path] = None,
 ) -> None:
-    """Apply mapping to create result as a table according to_schema
-    - Columns used to join the from_table are prefixed with "from_" in the mapping table
+    """Apply mapping to create result as a table according to_schema.
+    Columns used to join the from_table are prefixed with "from_" in the mapping table.
     """
-    left_table = Table(from_schema.name, metadata)
-    right_table = Table(mapping_table_name, metadata)
-    left_table_columns = [x.name for x in left_table.columns]
-    right_table_columns = [x.name for x in right_table.columns]
-    left_table_pass_thru_columns = set(left_table_columns).difference(
-        set(from_schema.list_columns())
-    )
+    left = backend.table(from_schema.name)
+    right = backend.table(mapping_table_name)
+    left_columns = left.columns
+    right_columns = right.columns
+    left_pass_thru_columns = set(left_columns) - set(from_schema.list_columns())
 
-    val_col = to_schema.value_column  # from left_table
-    final_cols = set(to_schema.list_columns()).union(left_table_pass_thru_columns)
-    right_cols = set(right_table_columns).intersection(final_cols)
+    val_col = to_schema.value_column
+    final_cols = set(to_schema.list_columns()) | left_pass_thru_columns
+    right_cols = set(right_columns) & final_cols
     left_cols = final_cols - right_cols - {val_col}
 
-    select_stmt: list[Any] = [left_table.c[x] for x in left_cols]
-    select_stmt += [right_table.c[x] for x in right_cols]
+    # Build join predicates
+    from_keys = [x for x in right_columns if x.startswith("from_")]
+    keys = [x.removeprefix("from_") for x in from_keys]
+    if not set(keys).issubset(set(left_columns)):
+        msg = f"Mapping keys {keys} not found in source table {from_schema.name}"
+        raise ConflictingInputsError(msg)
+    predicates = []
+    for k in keys:
+        left_col = left[k]
+        right_col = right["from_" + k]
+        # Cast to match types if needed (e.g., string vs int from pivoted columns)
+        if left_col.type() != right_col.type():
+            right_col = right_col.cast(left_col.type())
+        predicates.append(left_col == right_col)
 
-    tval_col = left_table.c[val_col]
-    if "factor" in right_table_columns:
-        tval_col *= right_table.c["factor"]  # type: ignore
+    # Perform the join
+    joined = left.join(right, predicates)
+
+    # In ibis joins, conflicting right-side columns get a "_right" suffix.
+    # Left-side columns keep their original names.
+    def _left_col(col: str) -> Any:
+        """Access a left-table column (keeps original name after join)."""
+        return joined[col]
+
+    def _right_col(col: str) -> Any:
+        """Access a right-table column, handling disambiguation."""
+        if col in left_columns and col in right_columns:
+            return joined[col + "_right"]
+        return joined[col]
+
+    # Build value expression (always from the left/source table)
+    val_expr: Any = _left_col(val_col)
+    if "factor" in right_columns:
+        val_expr = val_expr * _right_col("factor")
+
+    # Build select columns
+    select_exprs: list[Any] = []
+    for col in left_cols:
+        select_exprs.append(_left_col(col).name(col))
+    for col in right_cols:
+        select_exprs.append(_right_col(col).name(col))
+
     if not resampling_operation:
-        select_stmt.append(tval_col)
+        select_exprs.append(val_expr.name(val_col))
+        result = joined.select(select_exprs)
     else:
-        groupby_stmt = select_stmt.copy()
+        group_exprs = select_exprs.copy()
         match resampling_operation:
             case AggregationType.SUM:
-                select_stmt.append(func.sum(tval_col).label(val_col))
-            # case AggregationType.AVG:
-            #     select_stmt.append(func.avg(tval_col).label(val_col))
-            # case AggregationType.MIN:
-            #     select_stmt.append(func.min(tval_col).label(val_col))
-            # case AggregationType.MAX:
-            #     select_stmt.append(func.max(tval_col).label(val_col))
+                agg_expr = val_expr.sum().name(val_col)
             case _:
                 msg = f"Unsupported {resampling_operation=}"
                 raise InvalidOperation(msg)
-
-    from_keys = [x for x in right_table_columns if x.startswith("from_")]
-    keys = [x.removeprefix("from_") for x in from_keys]
-    assert set(keys).issubset(
-        set(left_table_columns)
-    ), f"Keys {keys} not in table={from_schema.name}"
-    on_stmt = reduce(and_, (left_table.c[x] == right_table.c["from_" + x] for x in keys))
-
-    query = select(*select_stmt).select_from(left_table).join(right_table, on_stmt)
-    if resampling_operation:
-        query = query.group_by(*groupby_stmt)
+        result = joined.group_by(group_exprs).aggregate(agg_expr)
 
     if output_file is not None:
         output_file = to_path(output_file)
-        write_query_to_parquet(engine, str(query), output_file, overwrite=True)
+        check_overwrite(output_file, overwrite=True)
+        backend.write_parquet(result, str(output_file))
         return
 
-    if engine.name == "hive":
-        create_materialized_view(
-            str(query), to_schema.name, engine, metadata, scratch_dir=scratch_dir
-        )
-    else:
-        create_table(to_schema.name, query, engine, metadata)
+    backend.create_table(to_schema.name, result, overwrite=True)

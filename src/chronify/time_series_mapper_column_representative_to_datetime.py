@@ -1,11 +1,14 @@
 from typing import Optional, Generator
 import re
-import sqlalchemy as sa
+import uuid
 from pathlib import Path
 import pandas as pd
 from datetime import datetime
 
+from loguru import logger
+
 from chronify.exceptions import InvalidParameter, InvalidValue
+from chronify.ibis.base import IbisBackend
 from chronify.time_series_mapper_base import TimeSeriesMapperBase, apply_mapping
 from chronify.time_configs import (
     YearMonthDayHourTimeNTZ,
@@ -18,8 +21,6 @@ from chronify.time_configs import (
 )
 from chronify.datetime_range_generator import DatetimeRangeGenerator
 from chronify.models import MappingTableSchema, TableSchema
-from chronify.sqlalchemy.functions import read_database, write_database
-from chronify.utils.sqlalchemy_table import create_table
 
 
 class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
@@ -51,16 +52,13 @@ class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
 
     def __init__(
         self,
-        engine: sa.Engine,
-        metadata: sa.MetaData,
+        backend: IbisBackend,
         from_schema: TableSchema,
         to_schema: TableSchema,
         data_adjustment: Optional[TimeBasedDataAdjustment] = None,
         wrap_time_allowed: bool = False,
     ) -> None:
-        super().__init__(
-            engine, metadata, from_schema, to_schema, data_adjustment, wrap_time_allowed
-        )
+        super().__init__(backend, from_schema, to_schema, data_adjustment, wrap_time_allowed)
 
         if not isinstance(to_schema.time_config, DatetimeRange):
             msg = "Target schema does not have DatetimeRange time config. Use a different mapper."
@@ -74,7 +72,6 @@ class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
 
     def map_time(
         self,
-        scratch_dir: Optional[Path] = None,
         output_file: Optional[Path] = None,
         check_mapped_timestamps: bool = False,
     ) -> None:
@@ -87,7 +84,7 @@ class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
         elif isinstance(self._from_time_config, MonthDayHourTimeNTZ):
             df_mapping, mapping_schema = self._create_mdh_mapping()
         elif isinstance(self._from_time_config, YearMonthDayPeriodTimeNTZ):
-            int_mapping = self._intermediate_mapping_ymdp_to_ymdh(scratch_dir)
+            int_mapping = self._intermediate_mapping_ymdp_to_ymdh()
             from_schema = int_mapping
             drop_table = int_mapping.name
             df_mapping, mapping_schema = self._create_ymdh_mapping(
@@ -97,30 +94,26 @@ class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
             msg = f"No mapping available for {type(self._from_time_config)}"
             raise InvalidParameter(msg)
 
-        apply_mapping(
-            df_mapping,
-            mapping_schema,
-            from_schema,
-            self._to_schema,
-            self._engine,
-            self._metadata,
-            self._data_adjustment,
-            scratch_dir=scratch_dir,
-            output_file=output_file,
-            check_mapped_timestamps=check_mapped_timestamps,
-        )
-
-        if drop_table:
-            with self._engine.begin() as conn:
-                table_type = "view" if self._engine.name == "hive" else "table"
-                conn.execute(sa.text(f"DROP {table_type} IF EXISTS {drop_table}"))
+        try:
+            apply_mapping(
+                df_mapping,
+                mapping_schema,
+                from_schema,
+                self._to_schema,
+                self._backend,
+                self._data_adjustment,
+                output_file=output_file,
+                check_mapped_timestamps=check_mapped_timestamps,
+            )
+        finally:
+            if drop_table and self._backend.has_table(drop_table):
+                self._backend.drop_table(drop_table)
 
     def check_schema_consistency(self) -> None:
         if isinstance(self._from_time_config, MonthDayHourTimeNTZ):
             self._validate_mdh_time_config()
 
     def _validate_length_and_resolution(self) -> None:
-        # not true for all input time config types
         if self._from_time_config.length != self._to_time_config.length:
             msg = "Length of time series arrays must match."
             raise InvalidParameter(msg)
@@ -133,44 +126,59 @@ class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
             msg = "Year is required for mdh time range to be converter to DatetimeRange."
             raise InvalidParameter(msg)
 
-    def _intermediate_mapping_ymdp_to_ymdh(self, scratch_dir: Path | None) -> TableSchema:
+    def _intermediate_mapping_ymdp_to_ymdh(self) -> TableSchema:
         """Convert ymdp to ymdh for intermediate mapping."""
-        mapping_table_name = "intermediate_ymdp_to_ymdh"
+        uid = uuid.uuid4().hex[:8]
+        mapping_table_name = f"_int_ymdp_to_ymdh_{uid}"
+        intermediate_ymdh_table_name = f"_int_ymdh_{uid}"
         period_col = self._from_time_config.hour_columns[0]
-        with self._engine.begin() as conn:
-            periods = read_database(
-                f"SELECT DISTINCT {period_col} FROM {self._from_schema.name}",
-                conn,
-                self._from_time_config,
-            )
-            df_mapping = generate_period_mapping(periods.iloc[:, 0])
-            write_database(
-                df_mapping,
-                conn,
-                mapping_table_name,
-                [self._from_time_config],
-                if_table_exists="replace",
-                scratch_dir=scratch_dir,
-            )
 
-        self._metadata.reflect(self._engine)
-        ymdp_table = sa.Table(self._from_schema.name, self._metadata)
-        mapping_table = sa.Table(mapping_table_name, self._metadata)
+        # Get distinct periods
+        table = self._backend.table(self._from_schema.name)
+        df_periods = self._backend.execute(table.select(period_col).distinct())
+        df_mapping = generate_period_mapping(df_periods.iloc[:, 0])
 
-        select_statement = [col for col in ymdp_table.columns if col.name != period_col]
-        select_statement.append(mapping_table.c["hour"])
-        query = (
-            sa.select(*select_statement)
-            .select_from(ymdp_table)
-            .join(mapping_table, ymdp_table.c[period_col] == mapping_table.c["from_period"])
-        )
+        try:
+            with self._backend.transaction():
+                self._backend.write_table(
+                    df_mapping,
+                    mapping_table_name,
+                    [self._from_time_config],
+                    if_exists="fail",
+                )
 
-        intermediate_ymdh_table_name = "intermediate_Ymdh"
-        create_table(intermediate_ymdh_table_name, query, self._engine, self._metadata)
+                # Build the join query using ibis
+                ymdp_table = self._backend.table(self._from_schema.name)
+                mapping_table = self._backend.table(mapping_table_name)
 
-        assert isinstance(
-            self._from_time_config, YearMonthDayPeriodTimeNTZ
-        ), "Intermediate mapping only valid for YearMonthDayPeriodNTZ time config"
+                # Select all columns from ymdp except the period column, plus hour from mapping
+                ymdp_cols = [c for c in ymdp_table.columns if c != period_col]
+                select_exprs = [ymdp_table[c] for c in ymdp_cols] + [mapping_table["hour"]]
+
+                joined = ymdp_table.join(
+                    mapping_table, ymdp_table[period_col] == mapping_table["from_period"]
+                )
+                result = joined.select(select_exprs)
+                self._backend.create_table(intermediate_ymdh_table_name, result)
+                # Drop the helper mapping table inside the transaction so commit
+                # doesn't retain it.
+                self._backend.drop_table(mapping_table_name)
+        except Exception:
+            # Spark fallback: rollback is a no-op, so clean up manually.
+            # Idempotent on DuckDB/SQLite where the rollback already dropped these.
+            # Each step is independently guarded so a cleanup failure cannot
+            # mask the original error.
+            for tbl in (mapping_table_name, intermediate_ymdh_table_name):
+                try:
+                    if self._backend.has_table(tbl):
+                        self._backend.drop_table(tbl)
+                except Exception:
+                    logger.exception("Failed to drop intermediate table {} during cleanup.", tbl)
+            raise
+
+        if not isinstance(self._from_time_config, YearMonthDayPeriodTimeNTZ):
+            msg = "Intermediate mapping only valid for YearMonthDayPeriodNTZ time config"
+            raise InvalidParameter(msg)
         return self._create_intermediate_ymdh_schema(
             intermediate_ymdh_table_name, self._from_schema, self._from_time_config
         )
