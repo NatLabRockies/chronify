@@ -83,17 +83,6 @@ class DuckDBBackend(IbisBackend):
             return cast(pd.DataFrame, self._connection.con.execute(sql).fetch_df())
         return cast(pd.DataFrame, self._connection.execute(expr))
 
-    def write_parquet(
-        self,
-        expr: ibis.Table,
-        path: str,
-        partition_by: list[str] | None = None,
-    ) -> None:
-        if partition_by:
-            self._connection.to_parquet(expr, path, partition_by=partition_by)
-        else:
-            self._connection.to_parquet(expr, path)
-
     def create_view_from_parquet(self, path: str, name: str) -> tuple[ibis.Table, ObjectType]:
         parquet_path = Path(path)
         if parquet_path.is_dir():

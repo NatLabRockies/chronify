@@ -126,17 +126,6 @@ class SparkBackend(IbisBackend):
             self._session.sql(f"DROP TABLE IF EXISTS {quoted_tmp}")
             self._remove_managed_table_location(tmp_name)
 
-    def write_parquet(
-        self,
-        expr: ibis.Table,
-        path: str,
-        partition_by: list[str] | None = None,
-    ) -> None:
-        if partition_by:
-            self._connection.to_parquet(expr, path, partitionBy=partition_by)
-        else:
-            self._connection.to_parquet(expr, path)
-
     def create_view_from_parquet(self, path: str, name: str) -> tuple[ibis.Table, ObjectType]:
         self._connection.create_view(name, self._connection.read_parquet(path))
         return self.table(name), ObjectType.VIEW

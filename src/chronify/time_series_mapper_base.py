@@ -1,4 +1,5 @@
 import abc
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -11,7 +12,7 @@ from chronify.exceptions import ConflictingInputsError, InvalidOperation
 from chronify.time_series_checker import check_timestamps
 from chronify.time import TimeIntervalType, ResamplingOperationType, AggregationType
 from chronify.time_configs import TimeBasedDataAdjustment
-from chronify.utils.path_utils import check_overwrite, to_path
+from chronify.utils.path_utils import check_overwrite, delete_if_exists, to_path
 
 
 class TimeSeriesMapperBase(abc.ABC):
@@ -74,7 +75,7 @@ class TimeSeriesMapperBase(abc.ABC):
         """Convert time columns with from_schema to to_schema configuration."""
 
 
-def apply_mapping(
+def apply_mapping(  # noqa: C901
     df_mapping: pd.DataFrame,
     mapping_schema: MappingTableSchema,
     from_schema: TableSchema,
@@ -85,52 +86,89 @@ def apply_mapping(
     output_file: Optional[Path] = None,
     check_mapped_timestamps: bool = False,
 ) -> None:
-    """Apply mapping to create result table with process to clean up and roll back if checks fail."""
-    backend.write_table(
-        df_mapping,
-        mapping_schema.name,
-        mapping_schema.time_configs,
-        if_exists="fail",
+    """Apply mapping to create result table.
+
+    The whole multi-step DDL — write the mapping table, create the result
+    table (or write the parquet file), optionally create a temp view from
+    the parquet, run timestamp checks — runs inside a single
+    ``backend.transaction()``. On DuckDB and SQLite, a failure rolls back
+    every DB-side artifact atomically. Spark has no rollback, so the except
+    path also handles cleanup there.
+
+    When ``output_file`` is set, the parquet write goes to a uniquely-named
+    staging path inside the transaction, then atomically renames over the
+    target only after the transaction commits. A failure leaves any
+    pre-existing target file untouched.
+    """
+    output_path = to_path(output_file) if output_file is not None else None
+    staging_path = (
+        output_path.with_name(f".{output_path.name}.staging.{uuid.uuid4().hex[:8]}")
+        if output_path is not None
+        else None
     )
     created_tmp_obj: Optional[ObjectType] = None
     try:
-        _apply_mapping(
-            mapping_schema.name,
-            from_schema,
-            to_schema,
-            backend,
-            resampling_operation=resampling_operation,
-            output_file=output_file,
-        )
-        if check_mapped_timestamps:
-            if output_file is not None:
-                output_file = to_path(output_file)
-                _, created_tmp_obj = backend.create_view_from_parquet(
-                    str(output_file), to_schema.name
-                )
-            try:
+        with backend.transaction():
+            backend.write_table(
+                df_mapping,
+                mapping_schema.name,
+                mapping_schema.time_configs,
+                if_exists="fail",
+            )
+            _apply_mapping(
+                mapping_schema.name,
+                from_schema,
+                to_schema,
+                backend,
+                resampling_operation=resampling_operation,
+                output_file=staging_path,
+            )
+            if check_mapped_timestamps:
+                if staging_path is not None:
+                    _, created_tmp_obj = backend.create_view_from_parquet(
+                        str(staging_path), to_schema.name
+                    )
                 check_timestamps(
                     backend,
                     to_schema.name,
                     to_schema,
                     leap_day_adjustment=data_adjustment.leap_day_adjustment,
                 )
-            except Exception:
-                logger.exception(
-                    "check_timestamps failed on mapped table {}. Drop it",
-                    to_schema.name,
-                )
-                if output_file is None:
-                    backend.drop_table(to_schema.name)
-                raise
-    finally:
+            # Drop temp artifacts inside the transaction so the commit doesn't
+            # retain them. The mapping table is always temp; the parquet view
+            # is temp only when we created it for the timestamp check.
+            backend.drop_table(mapping_schema.name)
+            if created_tmp_obj is ObjectType.TABLE:
+                backend.drop_table(to_schema.name)
+            elif created_tmp_obj is ObjectType.VIEW:
+                backend.drop_view(to_schema.name)
+        # Promote the staged parquet only after the transaction commits.
+        # The staging output may be a file (DuckDB) or a directory (Spark
+        # parquet writes are always directories), so explicitly remove any
+        # existing target first — ``Path.replace`` cannot overwrite a
+        # non-empty directory.
+        if staging_path is not None:
+            assert output_path is not None
+            delete_if_exists(output_path)
+            staging_path.replace(output_path)
+    except Exception:
+        logger.exception(
+            "Mapping failed for {} -> {}. Cleaning up.", from_schema.name, to_schema.name
+        )
+        # Idempotent cleanup. On DuckDB/SQLite the rollback already dropped
+        # these objects (has_table returns False); on Spark it didn't.
         if backend.has_table(mapping_schema.name):
             backend.drop_table(mapping_schema.name)
-        if created_tmp_obj is not None:
-            if created_tmp_obj == ObjectType.TABLE:
-                backend.drop_table(to_schema.name)
-            else:
+        if backend.has_table(to_schema.name):
+            if created_tmp_obj is ObjectType.VIEW:
                 backend.drop_view(to_schema.name)
+            else:
+                backend.drop_table(to_schema.name)
+        # Remove the staging output (file or directory); the original target
+        # is untouched because the rename never ran.
+        if staging_path is not None:
+            delete_if_exists(staging_path)
+        raise
 
 
 def _apply_mapping(  # noqa: C901

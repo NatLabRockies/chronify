@@ -39,6 +39,36 @@ def _adapt_value(v: Any) -> Any:
     return v
 
 
+class _NoCommitProxy:
+    """Connection proxy that suppresses commit/rollback.
+
+    ibis-sqlite's ``create_table`` (and a few other DDL paths) wraps its work in
+    ``with self.begin() as cur:``, which calls ``con.commit()`` on success.
+    That commit terminates whatever outer transaction we started in
+    :meth:`SQLiteBackend._begin_transaction`, breaking atomicity for DDL.
+
+    Swapping ``connection.con`` for a proxy that no-ops ``commit``/``rollback``
+    while still forwarding cursor/execute calls to the real connection lets
+    chronify own the transaction lifecycle for the duration of
+    :meth:`SQLiteBackend.transaction`. We restore the real connection on
+    commit/rollback.
+    """
+
+    __slots__ = ("_real",)
+
+    def __init__(self, real: sqlite3.Connection) -> None:
+        self._real = real
+
+    def commit(self) -> None:  # noqa: D401
+        return None
+
+    def rollback(self) -> None:  # noqa: D401
+        return None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
 class SQLiteBackend(IbisBackend):
     """Ibis backend for SQLite databases."""
 
@@ -64,6 +94,7 @@ class SQLiteBackend(IbisBackend):
             raise ConflictingInputsError(msg)
 
         self._in_transaction = False
+        self._real_con: sqlite3.Connection | None = None
         self._owns_connection = connection is None
         if connection is None:
             db = str(database)
@@ -140,8 +171,7 @@ class SQLiteBackend(IbisBackend):
 
     def execute_sql(self, query: str) -> None:
         logger.trace("execute_sql: {}", query)
-        con = self._connection.con
-        con.execute(query)
+        self._connection.con.execute(query)
         self._commit_if_needed()
 
     def dispose(self) -> None:
@@ -159,16 +189,43 @@ class SQLiteBackend(IbisBackend):
             dst_con.close()
 
     def _begin_transaction(self) -> None:
-        self._connection.con.execute("BEGIN")
+        # Issue BEGIN before swapping in the proxy so a failure (e.g. nested
+        # BEGIN, or an outer caller already in a transaction) leaves the
+        # backend in its original state rather than permanently pointed at
+        # _NoCommitProxy.
+        real = self._connection.con
+        real.execute("BEGIN")
+        # Swap in a proxy so ibis's internal con.commit() during DDL (notably
+        # in create_table) is suppressed for the duration of the transaction.
+        # The real connection is held aside and used directly for BEGIN /
+        # COMMIT / ROLLBACK.
+        self._real_con = real
+        self._connection.con = _NoCommitProxy(real)  # type: ignore[assignment]
         self._in_transaction = True
 
     def _commit_transaction(self) -> None:
-        self._connection.con.commit()
+        assert self._real_con is not None
+        real = self._real_con
+        # Restore connection state up front so a failure on COMMIT (e.g. the
+        # user finalized the transaction inside the block via
+        # ``execute_sql("COMMIT")``) doesn't leak the no-commit proxy into
+        # the backend's steady state. The ``in_transaction`` guard makes the
+        # wrapper a no-op when the underlying transaction has already been
+        # closed.
+        self._connection.con = real
+        self._real_con = None
         self._in_transaction = False
+        if real.in_transaction:
+            real.execute("COMMIT")
 
     def _rollback_transaction(self) -> None:
-        self._connection.con.rollback()
+        assert self._real_con is not None
+        real = self._real_con
+        self._connection.con = real
+        self._real_con = None
         self._in_transaction = False
+        if real.in_transaction:
+            real.execute("ROLLBACK")
 
     def _commit_if_needed(self) -> None:
         if not self._in_transaction:

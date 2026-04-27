@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from chronify import time_series_mapper_base
 from chronify.csv_io import read_csv
 from chronify.exceptions import (
     ConflictingInputsError,
@@ -1033,3 +1034,136 @@ def test_localize_time_zone_by_column(tmp_path, iter_stores_by_engine_no_data_in
     for tz, expected in expected_dct.items():
         actual = sorted(df2.loc[df2["time_zone"] == tz, "timestamp"])
         check_timestamp_lists(actual, expected)
+
+
+def test_map_table_preserves_existing_parquet_on_failure(tmp_path, monkeypatch):
+    """A failing remap to an existing parquet must not destroy the original."""
+    store = Store.create_in_memory_db()
+    year = 2020
+    length = 24
+    src_schema = TableSchema(
+        name="src_preserve",
+        value_column="value",
+        time_array_id_columns=["id"],
+        time_config=DatetimeRange(
+            start=datetime(year, 1, 1),
+            resolution=timedelta(hours=1),
+            length=length,
+            interval_type=TimeIntervalType.PERIOD_BEGINNING,
+            time_column="timestamp",
+        ),
+    )
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.date_range(datetime(year, 1, 1), periods=length, freq="h"),
+            "id": 1,
+            "value": list(range(length)),
+        }
+    )
+    store.ingest_table(df, src_schema)
+
+    output_file = tmp_path / "out.parquet"
+    sentinel = b"PRE-EXISTING-CONTENT"
+    output_file.write_bytes(sentinel)
+
+    dst_schema = TableSchema(
+        name="dst_preserve",
+        value_column="value",
+        time_array_id_columns=["id"],
+        time_config=DatetimeRange(
+            start=datetime(year, 1, 1, 1),
+            resolution=timedelta(hours=1),
+            length=length,
+            interval_type=TimeIntervalType.PERIOD_ENDING,
+            time_column="timestamp",
+        ),
+    )
+
+    def _fail(*args, **kwargs):
+        msg = "forced failure"
+        raise InvalidTable(msg)
+
+    monkeypatch.setattr(time_series_mapper_base, "check_timestamps", _fail)
+
+    with pytest.raises(InvalidTable, match="forced"):
+        store.map_table_time_config(
+            src_schema.name,
+            dst_schema,
+            output_file=output_file,
+            check_mapped_timestamps=True,
+        )
+
+    assert output_file.read_bytes() == sentinel
+    # No staging files left behind in tmp_path either.
+    leftover = [p for p in tmp_path.iterdir() if p.name != output_file.name]
+    assert leftover == []
+
+
+def test_map_table_cleanup_handles_directory_staging(tmp_path, monkeypatch):
+    """Spark writes parquet as a directory, not a file. Cleanup of a failed
+    map must use a directory-safe delete instead of unlink()."""
+    from chronify.ibis.base import IbisBackend
+
+    # Override write_parquet so the staging output is a directory, mirroring
+    # how pyspark's Backend.to_parquet writes (a directory of part-* files).
+    def _write_dir(self, expr, path, partition_by=None):  # noqa: ARG001
+        out = Path(path)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "part-0.parquet").write_bytes(b"not a real parquet")
+
+    monkeypatch.setattr(IbisBackend, "write_parquet", _write_dir)
+
+    store = Store.create_in_memory_db()
+    year = 2020
+    length = 24
+    src_schema = TableSchema(
+        name="src_dir_cleanup",
+        value_column="value",
+        time_array_id_columns=["id"],
+        time_config=DatetimeRange(
+            start=datetime(year, 1, 1),
+            resolution=timedelta(hours=1),
+            length=length,
+            interval_type=TimeIntervalType.PERIOD_BEGINNING,
+            time_column="timestamp",
+        ),
+    )
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.date_range(datetime(year, 1, 1), periods=length, freq="h"),
+            "id": 1,
+            "value": list(range(length)),
+        }
+    )
+    store.ingest_table(df, src_schema)
+
+    dst_schema = TableSchema(
+        name="dst_dir_cleanup",
+        value_column="value",
+        time_array_id_columns=["id"],
+        time_config=DatetimeRange(
+            start=datetime(year, 1, 1, 1),
+            resolution=timedelta(hours=1),
+            length=length,
+            interval_type=TimeIntervalType.PERIOD_ENDING,
+            time_column="timestamp",
+        ),
+    )
+
+    output_file = tmp_path / "spark_style_out"
+
+    # The fake parquet content fails downstream (in create_view_from_parquet
+    # or check_timestamps), exercising the cleanup path on a directory
+    # staging output. Without the directory-safe delete this raises
+    # IsADirectoryError and masks the original error.
+    with pytest.raises(Exception):  # noqa: B017
+        store.map_table_time_config(
+            src_schema.name,
+            dst_schema,
+            output_file=output_file,
+            check_mapped_timestamps=True,
+        )
+
+    assert not output_file.exists()
+    leftover = sorted(p.name for p in tmp_path.iterdir())
+    assert leftover == []

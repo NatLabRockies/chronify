@@ -29,7 +29,7 @@ store.ingest_tables(
     )
  )
 devices = store.read_table("devices")
-df = devices[devices.id == 2]["timestamp", "value"].execute()
+df = devices.filter(devices.id == 2).select("timestamp", "value").execute()
 df.head()
 ```
 

@@ -135,31 +135,40 @@ class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
         table = self._backend.table(self._from_schema.name)
         df_periods = self._backend.execute(table.select(period_col).distinct())
         df_mapping = generate_period_mapping(df_periods.iloc[:, 0])
-        self._backend.write_table(
-            df_mapping,
-            mapping_table_name,
-            [self._from_time_config],
-            if_exists="fail",
-        )
 
         try:
-            # Build the join query using ibis
-            ymdp_table = self._backend.table(self._from_schema.name)
-            mapping_table = self._backend.table(mapping_table_name)
+            with self._backend.transaction():
+                self._backend.write_table(
+                    df_mapping,
+                    mapping_table_name,
+                    [self._from_time_config],
+                    if_exists="fail",
+                )
 
-            # Select all columns from ymdp except the period column, plus hour from mapping
-            ymdp_cols = [c for c in ymdp_table.columns if c != period_col]
-            select_exprs = [ymdp_table[c] for c in ymdp_cols] + [mapping_table["hour"]]
+                # Build the join query using ibis
+                ymdp_table = self._backend.table(self._from_schema.name)
+                mapping_table = self._backend.table(mapping_table_name)
 
-            joined = ymdp_table.join(
-                mapping_table, ymdp_table[period_col] == mapping_table["from_period"]
-            )
-            result = joined.select(select_exprs)
-            self._backend.create_table(intermediate_ymdh_table_name, result)
-        finally:
-            # Always clean up the mapping table
+                # Select all columns from ymdp except the period column, plus hour from mapping
+                ymdp_cols = [c for c in ymdp_table.columns if c != period_col]
+                select_exprs = [ymdp_table[c] for c in ymdp_cols] + [mapping_table["hour"]]
+
+                joined = ymdp_table.join(
+                    mapping_table, ymdp_table[period_col] == mapping_table["from_period"]
+                )
+                result = joined.select(select_exprs)
+                self._backend.create_table(intermediate_ymdh_table_name, result)
+                # Drop the helper mapping table inside the transaction so commit
+                # doesn't retain it.
+                self._backend.drop_table(mapping_table_name)
+        except Exception:
+            # Spark fallback: rollback is a no-op, so clean up manually.
+            # Idempotent on DuckDB/SQLite where the rollback already dropped these.
             if self._backend.has_table(mapping_table_name):
                 self._backend.drop_table(mapping_table_name)
+            if self._backend.has_table(intermediate_ymdh_table_name):
+                self._backend.drop_table(intermediate_ymdh_table_name)
+            raise
 
         if not isinstance(self._from_time_config, YearMonthDayPeriodTimeNTZ):
             msg = "Intermediate mapping only valid for YearMonthDayPeriodNTZ time config"

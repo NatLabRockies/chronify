@@ -185,6 +185,12 @@ class ObjectType(StrEnum):
 class IbisBackend(ABC):
     """Abstract base class defining the interface for Ibis database backends."""
 
+    # Set while inside transaction(). Used for nesting (inner transaction()
+    # calls become passthroughs) and, on SQLite, by ``_commit_if_needed`` to
+    # decide whether DML auto-commits. Subclasses may shadow with an
+    # instance attribute.
+    _in_transaction: bool = False
+
     @property
     @abstractmethod
     def name(self) -> str:
@@ -406,29 +412,37 @@ class IbisBackend(ABC):
         """Roll back a real database transaction, if one was started."""
 
     @contextmanager
-    def transaction(self) -> Generator[list[tuple[str, ObjectType]], None, None]:
-        """Context manager for pseudo-transactions.
+    def transaction(self) -> Generator[None, None, None]:
+        """Context manager for a database transaction.
 
-        Tracks created objects (tables/views) so they can be cleaned up on failure.
-        On success, created objects are kept. On exception, they are dropped.
+        On DuckDB and SQLite this issues a real ``BEGIN`` / ``COMMIT`` /
+        ``ROLLBACK`` and covers both DML and DDL — work inside the block is
+        atomic. Spark has no transaction support, so partial writes inside the
+        block are not rolled back; callers that need to clean up after a
+        Spark failure must do so themselves.
 
-        Yields a list to which callers should append (name, ObjectType) tuples.
+        Nesting is supported as a passthrough: a ``transaction()`` block
+        opened while one is already active does not start a new transaction
+        and does not commit or roll back on its own. The outermost block
+        controls the lifecycle, so callers can wrap operations that
+        themselves use ``transaction()`` (e.g. mapping helpers) without
+        savepoints.
         """
-        created: list[tuple[str, ObjectType]] = []
+        if self._in_transaction:
+            yield
+            return
         self._begin_transaction()
+        self._in_transaction = True
         try:
-            yield created
+            yield
         except Exception:
-            self._rollback_transaction()
-            for obj_name, obj_type in reversed(created):
-                try:
-                    if obj_type == ObjectType.TABLE:
-                        self.drop_table(obj_name)
-                    else:
-                        self.drop_view(obj_name)
-                    logger.debug("Rolled back {} {}", obj_type.value, obj_name)
-                except Exception:
-                    logger.warning("Failed to roll back {} {}", obj_type.value, obj_name)
+            try:
+                self._rollback_transaction()
+            finally:
+                self._in_transaction = False
             raise
         else:
-            self._commit_transaction()
+            try:
+                self._commit_transaction()
+            finally:
+                self._in_transaction = False
