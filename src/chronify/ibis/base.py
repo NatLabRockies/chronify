@@ -115,7 +115,10 @@ def _normalize_arrow_timestamps(
         if config.dtype == TimeDataType.TIMESTAMP_NTZ and is_tz_aware:
             new_arr = arr.cast(pa.timestamp(arr.type.unit))
         elif config.dtype == TimeDataType.TIMESTAMP_TZ and not is_tz_aware:
-            new_arr = pc.assume_timezone(arr, "UTC")
+            # pyarrow 24 ships incomplete type stubs that omit dynamically-
+            # registered compute kernels like assume_timezone, even though
+            # the function exists at runtime.
+            new_arr = pc.assume_timezone(arr, "UTC")  # type: ignore[attr-defined]
         else:
             continue
         table = table.set_column(idx, table.column_names[idx], new_arr)
