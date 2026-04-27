@@ -28,16 +28,16 @@ store.ingest_tables(
         time_array_id_columns=["id"],
     )
  )
-query = "SELECT timestamp, value FROM devices WHERE id = 2"
-df = store.read_query(query).execute()
+devices = store.read_table("devices")
+df = devices[devices.id == 2]["timestamp", "value"].execute()
 df.head()
 ```
 
 ```
-            timestamp     value  id
-0 2020-01-01 00:00:00  0.594748   2
-1 2020-01-01 01:00:00  0.608295   2
-2 2020-01-01 02:00:00  0.297535   2
-3 2020-01-01 03:00:00  0.870238   2
-4 2020-01-01 04:00:00  0.376144   2
+            timestamp     value
+0 2020-01-01 00:00:00  0.594748
+1 2020-01-01 01:00:00  0.608295
+2 2020-01-01 02:00:00  0.297535
+3 2020-01-01 03:00:00  0.870238
+4 2020-01-01 04:00:00  0.376144
 ```

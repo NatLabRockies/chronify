@@ -130,6 +130,9 @@ class DuckDBBackend(IbisBackend):
     def _rollback_transaction(self) -> None:
         self._connection.con.execute("ROLLBACK")
 
+    def _supports_parquet_partitioning(self) -> bool:
+        return True
+
 
 def _quote_identifier(identifier: str) -> str:
     """Quote a SQL identifier for DuckDB, escaping embedded double quotes."""

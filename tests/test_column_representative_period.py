@@ -1,5 +1,7 @@
 """Tests for ColumnRepresentativeTimeGenerator with Period handler."""
 
+from datetime import tzinfo
+
 import pandas as pd
 import pytest
 
@@ -7,8 +9,9 @@ from chronify.column_representative_time_range_generator import (
     ColumnRepresentativeHandlerPeriod,
     ColumnRepresentativeTimeGenerator,
 )
-from chronify.exceptions import InvalidValue
+from chronify.exceptions import InvalidOperation, InvalidValue
 from chronify.time_configs import (
+    ColumnRepresentativeBase,
     MonthDayHourTimeNTZ,
     YearMonthDayPeriodTimeNTZ,
 )
@@ -23,6 +26,23 @@ def _make_period_config(year: int = 2024, length: int = 8760) -> YearMonthDayPer
         year=year,
         length=length,
     )
+
+
+class _UnsupportedColumnRepresentative(ColumnRepresentativeBase):
+    """ColumnRepresentativeBase subclass with no registered handler."""
+
+    @classmethod
+    def default_config(cls, length: int, year: int) -> "_UnsupportedColumnRepresentative":
+        return cls(year=year, length=length, month_column="month", day_column="day")
+
+    def list_time_columns(self) -> list[str]:
+        return [self.month_column, self.day_column, *self.hour_columns]
+
+    def get_time_zone_column(self) -> None:
+        return None
+
+    def get_time_zones(self) -> list[tzinfo | None]:
+        return []
 
 
 class TestColumnRepresentativeTimeGeneratorPeriod:
@@ -81,8 +101,6 @@ class TestColumnRepresentativeErrors:
 
     def test_unsupported_config_raises(self):
         """ColumnRepresentativeBase subclasses not matching known handlers should raise."""
-        config = _make_period_config()
-        gen = ColumnRepresentativeTimeGenerator(config)
-        # The generator was created successfully with a period config.
-        # Verify it works correctly.
-        assert len(gen.list_timestamps()) > 0
+        config = _UnsupportedColumnRepresentative.default_config(length=8760, year=2024)
+        with pytest.raises(InvalidOperation, match="No time generator"):
+            ColumnRepresentativeTimeGenerator(config)

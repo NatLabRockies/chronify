@@ -51,7 +51,7 @@ schema = TableSchema(
 )
 store = Store.create_in_memory_db()
 store.ingest_table(df, schema)
-store.read_query(f"SELECT * FROM {src_table_name} LIMIT 5").execute().head()
+store.read_table(src_table_name).limit(5).execute()
 ```
 
 ```
@@ -77,7 +77,7 @@ dst_schema = TableSchema(
     )
 )
 store.map_table_time_config(src_table_name, dst_schema)
-store.read_query(f"SELECT * FROM {dst_table_name} LIMIT 5").execute().head()
+store.read_table(dst_table_name).limit(5).execute()
 ```
 
 ```

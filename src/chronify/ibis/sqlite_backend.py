@@ -4,7 +4,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 from functools import singledispatchmethod
-from typing import Any, Sequence
+from typing import Any, Iterable
 
 import ibis
 import pandas as pd
@@ -178,7 +178,7 @@ class SQLiteBackend(IbisBackend):
     def _prepare_write_data(
         self,
         data: Any,
-        configs: Sequence[TimeBaseModel],
+        configs: Iterable[TimeBaseModel],
     ) -> pd.DataFrame:
         """SQLite stores timestamps as text, so joins compare raw strings.
 
@@ -190,15 +190,15 @@ class SQLiteBackend(IbisBackend):
         raise TypeError(msg)
 
     @_prepare_write_data.register
-    def _(self, data: pa.Table, configs: Sequence[TimeBaseModel]) -> pd.DataFrame:
+    def _(self, data: pa.Table, configs: Iterable[TimeBaseModel]) -> pd.DataFrame:
         return self._prepare_write_data(data.to_pandas(), configs)
 
     @_prepare_write_data.register
-    def _(self, data: ibis.Table, configs: Sequence[TimeBaseModel]) -> pd.DataFrame:
+    def _(self, data: ibis.Table, configs: Iterable[TimeBaseModel]) -> pd.DataFrame:
         return self._prepare_write_data(data.execute(), configs)
 
     @_prepare_write_data.register
-    def _(self, data: pd.DataFrame, configs: Sequence[TimeBaseModel]) -> pd.DataFrame:
+    def _(self, data: pd.DataFrame, configs: Iterable[TimeBaseModel]) -> pd.DataFrame:
         data = _normalize_timestamps(data, configs)
         copied = False
         for config in configs:
@@ -215,6 +215,9 @@ class SQLiteBackend(IbisBackend):
                 copied = True
             data[config.time_column] = data[config.time_column].dt.tz_convert("UTC")
         return data
+
+    def _supports_parquet_partitioning(self) -> bool:
+        return False
 
 
 def _infer_sqlite_path(connection: ibis.BaseBackend) -> str | None:

@@ -218,6 +218,9 @@ class SparkBackend(IbisBackend):
             else:
                 self._session.conf.set(key, prev)
 
+    def _supports_parquet_partitioning(self) -> bool:
+        return True
+
 
 def _quote_identifier(identifier: str) -> str:
     """Quote a SQL identifier for Spark SQL, escaping embedded backticks."""

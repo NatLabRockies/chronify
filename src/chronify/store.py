@@ -5,6 +5,7 @@ from datetime import tzinfo
 
 import ibis
 import pandas as pd
+import pyarrow as pa
 from loguru import logger
 
 from chronify.exceptions import (
@@ -303,22 +304,24 @@ class Store:
         src_schema: CsvTableSchema,
         dst_schema: TableSchema,
     ) -> bool:
-        df = read_csv(path, src_schema).to_df()
-        columns = set(src_schema.list_columns())
-        check_columns(df.columns, columns)
-
         if isinstance(src_schema.time_config, IndexTimeRangeBase):
             if isinstance(dst_schema.time_config, DatetimeRange):
                 raise NotImplementedError
-            else:
-                cls_name = dst_schema.time_config.__class__.__name__
-                msg = f"{src_schema.time_config.__class__.__name__} cannot be converted to {cls_name}"
-                raise NotImplementedError(msg)
+            cls_name = dst_schema.time_config.__class__.__name__
+            msg = f"{src_schema.time_config.__class__.__name__} cannot be converted to {cls_name}"
+            raise NotImplementedError(msg)
+
+        rel = read_csv(path, src_schema)
+        check_columns(list(rel.columns), set(src_schema.list_columns()))
+        # Hand the CSV through as Arrow rather than pandas so DuckDB can ingest
+        # zero-copy and other backends only pay the materialization cost they
+        # would have paid anyway.
+        data = rel.to_arrow_table()
 
         if src_schema.pivoted_dimension_name is not None:
-            return self._ingest_pivoted_table(df, src_schema, dst_schema)
+            return self._ingest_pivoted_table(data, src_schema, dst_schema)
 
-        return self._ingest_table(df, dst_schema)
+        return self._ingest_table(data, dst_schema)
 
     def ingest_pivoted_table(
         self,
@@ -447,7 +450,7 @@ class Store:
 
     def _ingest_pivoted_table(
         self,
-        data: pd.DataFrame | ibis.Table,
+        data: pd.DataFrame | pa.Table | ibis.Table,
         src_schema: PivotedTableSchema | CsvTableSchema,
         dst_schema: TableSchema,
     ) -> bool:
@@ -584,10 +587,11 @@ class Store:
 
     def _ingest_table(
         self,
-        data: pd.DataFrame | ibis.Table,
+        data: pd.DataFrame | pa.Table | ibis.Table,
         schema: TableSchema,
     ) -> bool:
-        check_columns(list(data.columns), schema.list_columns())
+        cols = data.column_names if isinstance(data, pa.Table) else list(data.columns)
+        check_columns(cols, schema.list_columns())
 
         if not self._backend.has_table(schema.name):
             self._backend.write_table(data, schema.name, [schema.time_config], if_exists="fail")

@@ -5,12 +5,13 @@ from collections import Counter
 from contextlib import contextmanager
 from enum import StrEnum
 from functools import singledispatch, singledispatchmethod
-from typing import Any, Generator, Sequence, cast
+from typing import Any, Generator, Iterable, cast
 
 import ibis
 import ibis.expr.types as ir
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 from loguru import logger
 from pandas import DatetimeTZDtype
 
@@ -27,7 +28,7 @@ _DATETIME_RANGES = (DatetimeRange, DatetimeRangeWithTZColumn)
 DatetimeRanges = DatetimeRange | DatetimeRangeWithTZColumn
 
 
-def _check_one_config_per_datetime_column(configs: Sequence[TimeBaseModel]) -> None:
+def _check_one_config_per_datetime_column(configs: Iterable[TimeBaseModel]) -> None:
     time_col_count = Counter(
         config.time_column for config in configs if isinstance(config, DatetimeRangeBase)
     )
@@ -39,15 +40,18 @@ def _check_one_config_per_datetime_column(configs: Sequence[TimeBaseModel]) -> N
 
 def _normalize_timestamps(
     df: pd.DataFrame,
-    configs: Sequence[TimeBaseModel],
+    configs: Iterable[TimeBaseModel],
 ) -> pd.DataFrame:
-    """Normalize datetime columns so their pandas dtype matches the schema config."""
+    """Normalize datetime columns so their pandas dtype matches the schema config.
+    Does not change the caller's DataFrame.
+    """
     copied = False
+    columns = set(df.columns)
     for config in configs:
         if not isinstance(config, _DATETIME_RANGES):
             continue
         col = config.time_column
-        if col not in df.columns:
+        if col not in columns:
             continue
         if not pd.api.types.is_datetime64_any_dtype(df[col]):
             continue
@@ -70,7 +74,7 @@ def _normalize_timestamps(
 
 def _arrow_needs_timestamp_normalization(
     table: pa.Table,
-    configs: Sequence[TimeBaseModel],
+    configs: Iterable[TimeBaseModel],
 ) -> bool:
     fields = {field.name: field.type for field in table.schema}
     for config in configs:
@@ -85,6 +89,37 @@ def _arrow_needs_timestamp_normalization(
         if config.dtype == TimeDataType.TIMESTAMP_TZ and timezone is None:
             return True
     return False
+
+
+def _normalize_arrow_timestamps(
+    table: pa.Table,
+    configs: Iterable[TimeBaseModel],
+) -> pa.Table:
+    """Normalize timestamp columns of an Arrow table to match the schema configs.
+
+    Casts tz-aware → tz-naive (preserving UTC instants) and localizes tz-naive →
+    UTC, matching the semantics of :func:`_normalize_timestamps` for pandas. Stays
+    in Arrow so backends that ingest Arrow natively avoid a pandas round-trip.
+    """
+    indices = {name: i for i, name in enumerate(table.column_names)}
+    for config in configs:
+        if not isinstance(config, _DATETIME_RANGES):
+            continue
+        idx = indices.get(config.time_column)
+        if idx is None:
+            continue
+        arr = table.column(idx)
+        if not pa.types.is_timestamp(arr.type):
+            continue
+        is_tz_aware = arr.type.tz is not None
+        if config.dtype == TimeDataType.TIMESTAMP_NTZ and is_tz_aware:
+            new_arr = arr.cast(pa.timestamp(arr.type.unit))
+        elif config.dtype == TimeDataType.TIMESTAMP_TZ and not is_tz_aware:
+            new_arr = pc.assume_timezone(arr, "UTC")
+        else:
+            continue
+        table = table.set_column(idx, table.column_names[idx], new_arr)
+    return table
 
 
 @singledispatch
@@ -116,7 +151,7 @@ def _select_columns(data: Any, columns: list[str]) -> Any:
 
 @_select_columns.register
 def _(data: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
-    return data.loc[:, columns]
+    return data[columns]
 
 
 @_select_columns.register
@@ -164,6 +199,10 @@ class IbisBackend(ABC):
     @abstractmethod
     def connection(self) -> ibis.BaseBackend:
         """Return the underlying ibis connection."""
+
+    @abstractmethod
+    def _supports_parquet_partitioning(self) -> bool:
+        """Return True if the backend supports Hive partitioning of Parquet files."""
 
     def create_table(
         self,
@@ -234,9 +273,12 @@ class IbisBackend(ABC):
     ) -> None:
         """Write an ibis expression result to a Parquet file."""
         if partition_by:
-            msg = f"{self.name} backend does not support partitioned Parquet writes."
-            raise NotImplementedError(msg)
-        self.connection.to_parquet(expr, path)
+            if not self._supports_parquet_partitioning():
+                msg = f"{self.name} backend does not support partitioned Parquet writes."
+                raise NotImplementedError(msg)
+            self.connection.to_parquet(expr, path, partition_by=partition_by)
+        else:
+            self.connection.to_parquet(expr, path)
 
     @abstractmethod
     def create_view_from_parquet(self, path: str, name: str) -> tuple[ibis.Table, ObjectType]:
@@ -258,7 +300,7 @@ class IbisBackend(ABC):
     def execute_sql_to_df(self, query: str) -> pd.DataFrame:
         """Execute a raw SQL query and return a DataFrame."""
         logger.trace("execute_sql_to_df: {}", query)
-        return cast(pd.DataFrame, self.sql(query).execute())
+        return self.execute(self.sql(query))
 
     def read_query(self, expr: ibis.Table, config: TimeBaseModel) -> pd.DataFrame:
         """Execute an Ibis expression and return a pandas DataFrame."""
@@ -282,7 +324,7 @@ class IbisBackend(ABC):
         self,
         data: pd.DataFrame | pa.Table | ibis.Table,
         name: str,
-        configs: Sequence[TimeBaseModel],
+        configs: Iterable[TimeBaseModel],
         if_exists: str = "append",
     ) -> None:
         """Write tabular data to the database, applying backend-specific normalization.
@@ -300,7 +342,7 @@ class IbisBackend(ABC):
     def _prepare_write_data(
         self,
         data: Any,
-        configs: Sequence[TimeBaseModel],
+        configs: Iterable[TimeBaseModel],
     ) -> pd.DataFrame | pa.Table | ibis.Table:
         """Normalize data before insert/create_table.
 
@@ -312,17 +354,17 @@ class IbisBackend(ABC):
         raise TypeError(msg)
 
     @_prepare_write_data.register
-    def _(self, data: pd.DataFrame, configs: Sequence[TimeBaseModel]) -> pd.DataFrame:
+    def _(self, data: pd.DataFrame, configs: Iterable[TimeBaseModel]) -> pd.DataFrame:
         return _normalize_timestamps(data, configs)
 
     @_prepare_write_data.register
-    def _(self, data: pa.Table, configs: Sequence[TimeBaseModel]) -> pd.DataFrame | pa.Table:
+    def _(self, data: pa.Table, configs: Iterable[TimeBaseModel]) -> pa.Table:
         if _arrow_needs_timestamp_normalization(data, configs):
-            return self._prepare_write_data(data.to_pandas(), configs)
+            return _normalize_arrow_timestamps(data, configs)
         return data
 
     @_prepare_write_data.register
-    def _(self, data: ibis.Table, configs: Sequence[TimeBaseModel]) -> ibis.Table:
+    def _(self, data: ibis.Table, configs: Iterable[TimeBaseModel]) -> ibis.Table:
         return data
 
     def _apply_if_exists(

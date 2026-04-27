@@ -148,43 +148,65 @@ class TimeSeriesChecker:
         filtered = table.filter(table[first_time_col].notnull())
 
         if not id_cols:
+            # Single time array: scalar count comparisons, no per-row materialization.
+            count_by_ta = int(cast(Any, filtered.count().execute()))
+            if has_tz_naive_prevailing:
+                if count_by_ta != count:
+                    msg = (
+                        f"The count of time values in each time array must be {count}. "
+                        f"count = {count_by_ta}"
+                    )
+                    raise InvalidTable(msg)
+                return
             distinct_count_by_ta = int(
                 cast(Any, filtered.select(time_cols).distinct().count().execute())
             )
-            count_by_ta = int(cast(Any, filtered.count().execute()))
-            df = pd.DataFrame(
-                [{"distinct_count_by_ta": distinct_count_by_ta, "count_by_ta": count_by_ta}]
-            )
-        else:
-            counts = filtered.group_by(id_cols).aggregate(count_by_ta=filtered.count())
-            distinct_rows = filtered.select(id_cols + time_cols).distinct()
-            distinct = distinct_rows.group_by(id_cols).aggregate(
-                distinct_count_by_ta=distinct_rows.count()
-            )
-            df = counts.join(distinct, id_cols).execute()
-
-        for _, result in df.iterrows():
-            distinct_count_by_ta = result["distinct_count_by_ta"]
-            count_by_ta = result["count_by_ta"]
-
-            if has_tz_naive_prevailing and not count_by_ta == count:
-                values = ", ".join(f"{x}={result[x]}" for x in id_cols)
-                msg = (
-                    f"The count of time values in each time array must be {count}."
-                    f"Time array identifiers: {values}. "
-                    f"count = {count_by_ta}"
-                )
-                raise InvalidTable(msg)
-
-            if not has_tz_naive_prevailing and not count_by_ta == count == distinct_count_by_ta:
-                values = ", ".join(f"{x}={result[x]}" for x in id_cols)
+            if not count_by_ta == count == distinct_count_by_ta:
                 msg = (
                     f"The count of time values in each time array must be {count}, and each "
                     "value must be distinct. "
-                    f"Time array identifiers: {values}. "
                     f"count = {count_by_ta}, distinct count = {distinct_count_by_ta}. "
                 )
                 raise InvalidTable(msg)
+            return
+
+        # Multiple time arrays: aggregate per id, then push the count comparison into
+        # SQL so we only materialize the first offending row (if any) for the error.
+        counts = filtered.group_by(id_cols).aggregate(count_by_ta=filtered.count())
+        distinct_rows = filtered.select(id_cols + time_cols).distinct()
+        distinct = distinct_rows.group_by(id_cols).aggregate(
+            distinct_count_by_ta=distinct_rows.count()
+        )
+        joined = counts.join(distinct, id_cols)
+
+        if has_tz_naive_prevailing:
+            invalid = joined.filter(joined["count_by_ta"] != count)
+        else:
+            invalid = joined.filter(
+                (joined["count_by_ta"] != count) | (joined["distinct_count_by_ta"] != count)
+            )
+
+        bad_rows = self._backend.execute(invalid.limit(1))
+        if bad_rows.empty:
+            return
+
+        result = bad_rows.iloc[0]
+        values = ", ".join(f"{x}={result[x]}" for x in id_cols)
+        if has_tz_naive_prevailing:
+            msg = (
+                f"The count of time values in each time array must be {count}."
+                f"Time array identifiers: {values}. "
+                f"count = {result['count_by_ta']}"
+            )
+        else:
+            msg = (
+                f"The count of time values in each time array must be {count}, and each "
+                "value must be distinct. "
+                f"Time array identifiers: {values}. "
+                f"count = {result['count_by_ta']}, "
+                f"distinct count = {result['distinct_count_by_ta']}. "
+            )
+        raise InvalidTable(msg)
 
 
 def check_timestamp_lists(
