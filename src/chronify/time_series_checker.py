@@ -1,13 +1,13 @@
-from sqlalchemy import Connection, Table, select, text
-from typing import Optional
+from typing import Any, Optional, cast
 from datetime import datetime, tzinfo
 
+import ibis
 import pandas as pd
 
 from chronify.exceptions import InvalidTable
+from chronify.ibis.base import IbisBackend
 from chronify.models import TableSchema
 from chronify.time_configs import DatetimeRangeWithTZColumn
-from chronify.sqlalchemy.functions import read_database
 from chronify.time_range_generator_factory import make_time_range_generator
 from chronify.datetime_range_generator import DatetimeRangeGeneratorExternalTimeZone
 from chronify.time import LeapDayAdjustmentType
@@ -15,14 +15,14 @@ from chronify.time_utils import is_prevailing_time_zone
 
 
 def check_timestamps(
-    conn: Connection,
-    table: Table,
+    backend: IbisBackend,
+    table_name: str,
     schema: TableSchema,
     leap_day_adjustment: Optional[LeapDayAdjustmentType] = None,
 ) -> None:
     """Performs checks on time series arrays in a table."""
     TimeSeriesChecker(
-        conn, table, schema, leap_day_adjustment=leap_day_adjustment
+        backend, table_name, schema, leap_day_adjustment=leap_day_adjustment
     ).check_timestamps()
 
 
@@ -34,14 +34,14 @@ class TimeSeriesChecker:
 
     def __init__(
         self,
-        conn: Connection,
-        table: Table,
+        backend: IbisBackend,
+        table_name: str,
         schema: TableSchema,
         leap_day_adjustment: Optional[LeapDayAdjustmentType] = None,
     ) -> None:
-        self._conn = conn
+        self._backend = backend
         self._schema = schema
-        self._table = table
+        self._table_name = table_name
         self._time_generator = make_time_range_generator(
             schema.time_config, leap_day_adjustment=leap_day_adjustment
         )
@@ -68,10 +68,11 @@ class TimeSeriesChecker:
         """For tz-naive or tz-aware time without external time zone column"""
         expected = self._time_generator.list_timestamps()
         time_columns = self._time_generator.list_time_columns()
-        stmt = select(*(self._table.c[x] for x in time_columns)).distinct()
+        table = self._backend.table(self._table_name)
+        expr = table.select(time_columns).distinct()
         for col in time_columns:
-            stmt = stmt.where(self._table.c[col].is_not(None))
-        df = read_database(stmt, self._conn, self._schema.time_config)
+            expr = expr.filter(table[col].notnull())
+        df = self._backend.read_query(expr, self._schema.time_config)
         actual = self._time_generator.list_distinct_timestamps_from_dataframe(df)
         expected = sorted(set(expected))  # drop duplicates for tz-naive prevailing time
         check_timestamp_lists(actual, expected)
@@ -86,10 +87,11 @@ class TimeSeriesChecker:
         time_columns = self._time_generator.list_time_columns()
         assert isinstance(self._schema.time_config, DatetimeRangeWithTZColumn)  # for mypy
         time_columns.append(self._schema.time_config.get_time_zone_column())
-        stmt = select(*(self._table.c[x] for x in time_columns)).distinct()
+        table = self._backend.table(self._table_name)
+        expr = table.select(time_columns).distinct()
         for col in time_columns:
-            stmt = stmt.where(self._table.c[col].is_not(None))
-        df = read_database(stmt, self._conn, self._schema.time_config)
+            expr = expr.filter(table[col].notnull())
+        df = self._backend.read_query(expr, self._schema.time_config)
         actual_dct = self._time_generator.list_distinct_timestamps_by_time_zone_from_dataframe(df)
         if sorted(expected_dct.keys()) != sorted(actual_dct.keys()):
             msg = (
@@ -117,20 +119,16 @@ class TimeSeriesChecker:
         if len(time_columns) == 1:
             return
 
-        all_are_null = " AND ".join((f"{x} IS NULL" for x in time_columns))
-        any_are_null = " OR ".join((f"{x} IS NULL" for x in time_columns))
-        query_all = f"SELECT COUNT(*) FROM {self._schema.name} WHERE {all_are_null}"
-        query_any = f"SELECT COUNT(*) FROM {self._schema.name} WHERE {any_are_null}"
-        res_all = self._conn.execute(text(query_all)).fetchone()
-        assert res_all is not None
-        res_any = self._conn.execute(text(query_any)).fetchone()
-        assert res_any is not None
-        if res_all[0] != res_any[0]:
+        table = self._backend.table(self._table_name)
+        null_exprs = [table[col].isnull() for col in time_columns]
+        count_all = int(cast(Any, table.filter(ibis.and_(*null_exprs)).count().execute()))
+        count_any = int(cast(Any, table.filter(ibis.or_(*null_exprs)).count().execute()))
+        if count_all != count_any:
             msg = (
                 "If any time columns have a NULL value for a row, all time columns in that "
                 "row must be NULL. "
-                f"Row count where all time values are NULL: {res_all[0]}. "
-                f"Row count where any time values are NULL: {res_any[0]}. "
+                f"Row count where all time values are NULL: {count_all}. "
+                f"Row count where any time values are NULL: {count_any}. "
             )
             raise InvalidTable(msg)
 
@@ -138,95 +136,77 @@ class TimeSeriesChecker:
         if isinstance(
             self._time_generator, DatetimeRangeGeneratorExternalTimeZone
         ) and self._has_prevailing_time_zone(self._schema.time_config.get_time_zones()):
-            # cannot check counts by timestamps when tz-naive prevailing time zones are present
             has_tz_naive_prevailing = True
         else:
             has_tz_naive_prevailing = False
 
-        id_cols = ",".join(self._schema.time_array_id_columns)
-        time_cols = ",".join(self._schema.time_config.list_time_columns())
-        # NULL consistency was checked above.
-        where_clause = f"{self._time_generator.list_time_columns()[0]} IS NOT NULL"
-        on_expr = " AND ".join([f"t1.{x} = t2.{x}" for x in self._schema.time_array_id_columns])
-        t1_id_cols = ",".join((f"t1.{x}" for x in self._schema.time_array_id_columns))
+        id_cols = self._schema.time_array_id_columns
+        time_cols = self._schema.time_config.list_time_columns()
+        first_time_col = self._time_generator.list_time_columns()[0]
 
-        if not self._schema.time_array_id_columns:
-            query = f"""
-                WITH distinct_time_values_by_array AS (
-                    SELECT DISTINCT {time_cols}
-                    FROM {self._schema.name}
-                    WHERE {where_clause}
-                ),
-                t1 AS (
-                    SELECT COUNT(*) AS distinct_count_by_ta
-                    FROM distinct_time_values_by_array
-                ),
-                t2 AS (
-                    SELECT COUNT(*) AS count_by_ta
-                    FROM {self._schema.name}
-                    WHERE {where_clause}
-                )
-                SELECT
-                    t1.distinct_count_by_ta
-                    ,t2.count_by_ta
-                FROM t1
-                CROSS JOIN t2
-            """
-        else:
-            query = f"""
-                WITH distinct_time_values_by_array AS (
-                    SELECT DISTINCT {id_cols}, {time_cols}
-                    FROM {self._schema.name}
-                    WHERE {where_clause}
-                ),
-                t1 AS (
-                    SELECT {id_cols}, COUNT(*) AS distinct_count_by_ta
-                    FROM distinct_time_values_by_array
-                    GROUP BY {id_cols}
-                ),
-                t2 AS (
-                    SELECT {id_cols}, COUNT(*) AS count_by_ta
-                    FROM {self._schema.name}
-                    WHERE {where_clause}
-                    GROUP BY {id_cols}
-                )
-                SELECT
-                    t1.distinct_count_by_ta
-                    ,t2.count_by_ta
-                    ,{t1_id_cols}
-                FROM t1
-                JOIN t2
-                ON {on_expr}
-            """
+        table = self._backend.table(self._table_name)
+        filtered = table.filter(table[first_time_col].notnull())
 
-        for result in self._conn.execute(text(query)).fetchall():
-            distinct_count_by_ta = result[0]
-            count_by_ta = result[1]
-
-            if has_tz_naive_prevailing and not count_by_ta == count:
-                id_vals = result[2:]
-                values = ", ".join(
-                    f"{x}={y}" for x, y in zip(self._schema.time_array_id_columns, id_vals)
-                )
-                msg = (
-                    f"The count of time values in each time array must be {count}."
-                    f"Time array identifiers: {values}. "
-                    f"count = {count_by_ta}"
-                )
-                raise InvalidTable(msg)
-
-            if not has_tz_naive_prevailing and not count_by_ta == count == distinct_count_by_ta:
-                id_vals = result[2:]
-                values = ", ".join(
-                    f"{x}={y}" for x, y in zip(self._schema.time_array_id_columns, id_vals)
-                )
+        if not id_cols:
+            # Single time array: scalar count comparisons, no per-row materialization.
+            count_by_ta = int(cast(Any, filtered.count().execute()))
+            if has_tz_naive_prevailing:
+                if count_by_ta != count:
+                    msg = (
+                        f"The count of time values in each time array must be {count}. "
+                        f"count = {count_by_ta}"
+                    )
+                    raise InvalidTable(msg)
+                return
+            distinct_count_by_ta = int(
+                cast(Any, filtered.select(time_cols).distinct().count().execute())
+            )
+            if not count_by_ta == count == distinct_count_by_ta:
                 msg = (
                     f"The count of time values in each time array must be {count}, and each "
                     "value must be distinct. "
-                    f"Time array identifiers: {values}. "
                     f"count = {count_by_ta}, distinct count = {distinct_count_by_ta}. "
                 )
                 raise InvalidTable(msg)
+            return
+
+        # Multiple time arrays: aggregate per id, then push the count comparison into
+        # SQL so we only materialize the first offending row (if any) for the error.
+        counts = filtered.group_by(id_cols).aggregate(count_by_ta=filtered.count())
+        distinct_rows = filtered.select(id_cols + time_cols).distinct()
+        distinct = distinct_rows.group_by(id_cols).aggregate(
+            distinct_count_by_ta=distinct_rows.count()
+        )
+        joined = counts.join(distinct, id_cols)
+
+        if has_tz_naive_prevailing:
+            invalid = joined.filter(joined["count_by_ta"] != count)
+        else:
+            invalid = joined.filter(
+                (joined["count_by_ta"] != count) | (joined["distinct_count_by_ta"] != count)
+            )
+
+        bad_rows = self._backend.execute(invalid.limit(1))
+        if bad_rows.empty:
+            return
+
+        result = bad_rows.iloc[0]
+        values = ", ".join(f"{x}={result[x]}" for x in id_cols)
+        if has_tz_naive_prevailing:
+            msg = (
+                f"The count of time values in each time array must be {count}."
+                f"Time array identifiers: {values}. "
+                f"count = {result['count_by_ta']}"
+            )
+        else:
+            msg = (
+                f"The count of time values in each time array must be {count}, and each "
+                "value must be distinct. "
+                f"Time array identifiers: {values}. "
+                f"count = {result['count_by_ta']}, "
+                f"distinct count = {result['distinct_count_by_ta']}. "
+            )
+        raise InvalidTable(msg)
 
 
 def check_timestamp_lists(

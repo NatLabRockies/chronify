@@ -14,17 +14,9 @@ $ tar -xzf spark-4.0.1-bin-hadoop3.tgz
 $ export SPARK_HOME=$(pwd)/spark-4.0.1-bin-hadoop3
 ```
 
-Start a Thrift server. This allows JDBC clients to send SQL queries to an in-process Spark cluster
-running in local mode.
-```
-$ $SPARK_HOME/sbin/start-thriftserver.sh --master=spark://$(hostname):7077
-```
-
-The URL to connect to this server is `hive://localhost:10000/default`
-
 ## Installation on an HPC
-The chronify development team uses these
-[scripts](https://github.com/NREL/HPC/tree/master/applications/spark) to run Spark on NREL's HPC.
+The chronify development team uses this
+[package](https://github.com/NatLabRockies/sparkctl) to run Spark on NLR's HPC.
 
 ## Chronify Usage
 This example creates a chronify Store with Spark as the backend and then adds a view to a Parquet
@@ -70,14 +62,23 @@ schema = TableSchema(
 
 ```python
 from chronify import Store
+from chronify.ibis.spark_backend import SparkBackend
 
-store = Store.create_new_hive_store("hive://localhost:10000/default")
-store.create_view_from_parquet("data.parquet")
+store = Store(backend=SparkBackend())
+store.create_view_from_parquet("data.parquet", schema)
+```
+
+Alternatively, pass a pre-configured PySpark session:
+```python
+from pyspark.sql import SparkSession
+
+session = SparkSession.builder.master("local").getOrCreate()
+store = Store(backend=SparkBackend(session=session))
 ```
 
 Verify the data:
 ```python
-store.read_table(schema.name).head()
+store.read_table(schema.name).execute().head()
 ```
 ```
             timestamp  id     value

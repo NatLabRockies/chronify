@@ -1,11 +1,10 @@
 import pandas as pd
-from sqlalchemy import Engine, MetaData
 import pytest
 from datetime import timedelta
 from zoneinfo import ZoneInfo
 from typing import Any, Optional
 
-from chronify.sqlalchemy.functions import read_database, write_database
+from chronify.ibis import IbisBackend
 from chronify.time_series_mapper import map_time
 from chronify.time_configs import (
     DatetimeRange,
@@ -139,7 +138,7 @@ def data_for_unaligned_time_mapping(
 
 
 def run_test(
-    engine: Engine,
+    backend: IbisBackend,
     df: pd.DataFrame,
     from_schema: TableSchema,
     to_schema: TableSchema,
@@ -148,19 +147,13 @@ def run_test(
     wrap_time_allowed: bool = False,
 ) -> None:
     # Ingest
-    metadata = MetaData()
-    with engine.begin() as conn:
-        write_database(
-            df, conn, from_schema.name, [from_schema.time_config], if_table_exists="replace"
-        )
-    metadata.reflect(engine, views=True)
+    backend.write_table(df, from_schema.name, [from_schema.time_config], if_exists="replace")
 
     # Map
     if error:
         with pytest.raises(error[0], match=error[1]):
             map_time(
-                engine,
-                metadata,
+                backend,
                 from_schema,
                 to_schema,
                 data_adjustment=data_adjustment,
@@ -169,8 +162,7 @@ def run_test(
             )
     else:
         map_time(
-            engine,
-            metadata,
+            backend,
             from_schema,
             to_schema,
             data_adjustment=data_adjustment,
@@ -179,10 +171,9 @@ def run_test(
         )
 
 
-def get_output_table(engine: Engine, to_schema: TableSchema) -> pd.DataFrame:
-    with engine.connect() as conn:
-        query = f"select * from {to_schema.name}"
-        queried = read_database(query, conn, to_schema.time_config)
+def get_output_table(backend: IbisBackend, to_schema: TableSchema) -> pd.DataFrame:
+    expr = backend.sql(f"select * from {to_schema.name}")
+    queried = backend.read_query(expr, to_schema.time_config)
     return queried
 
 
@@ -190,22 +181,22 @@ def get_output_table(engine: Engine, to_schema: TableSchema) -> pd.DataFrame:
 @pytest.mark.parametrize("interval_shift", [False, True])
 @pytest.mark.parametrize("dst_std_time", [False, True])
 def test_simple_mapping(
-    iter_engines: Engine, src_tz_naive: bool, interval_shift: bool, dst_std_time: bool
+    iter_backends: IbisBackend, src_tz_naive: bool, interval_shift: bool, dst_std_time: bool
 ) -> None:
     src_df, src_schema, dst_schema = data_for_simple_mapping(
         tz_naive=src_tz_naive, interval_shift=interval_shift, standard_time=dst_std_time
     )
     error = None
-    run_test(iter_engines, src_df, src_schema, dst_schema, error)
+    run_test(iter_backends, src_df, src_schema, dst_schema, error)
 
-    dfo = get_output_table(iter_engines, dst_schema)
+    dfo = get_output_table(iter_backends, dst_schema)
     assert sorted(dfo["value"]) == sorted(src_df["value"])
 
 
 @pytest.mark.parametrize("interval_shift", [False, True])
 @pytest.mark.parametrize("dst_std_time", [False, True])
 def test_unaligned_time_mapping(
-    iter_engines: Engine, interval_shift: bool, dst_std_time: bool
+    iter_backends: IbisBackend, interval_shift: bool, dst_std_time: bool
 ) -> None:
     src_df, src_schema, dst_schema = data_for_unaligned_time_mapping(
         interval_shift=interval_shift, standard_time=dst_std_time
@@ -213,7 +204,7 @@ def test_unaligned_time_mapping(
     error = None
     wrap_time_allowed = True
     run_test(
-        iter_engines,
+        iter_backends,
         src_df,
         src_schema,
         dst_schema,
@@ -221,18 +212,18 @@ def test_unaligned_time_mapping(
         wrap_time_allowed=wrap_time_allowed,
     )
 
-    dfo = get_output_table(iter_engines, dst_schema)
+    dfo = get_output_table(iter_backends, dst_schema)
     assert sorted(dfo["value"]) == sorted(src_df["value"])
 
 
-def test_unaligned_time_mapping_without_wrap_time(iter_engines: Engine) -> None:
+def test_unaligned_time_mapping_without_wrap_time(iter_backends: IbisBackend) -> None:
     src_df, src_schema, dst_schema = data_for_unaligned_time_mapping()
     error = (
         ConflictingInputsError,
         "Length must match between",
     )
     run_test(
-        iter_engines,
+        iter_backends,
         src_df,
         src_schema,
         dst_schema,
@@ -244,7 +235,7 @@ def test_unaligned_time_mapping_without_wrap_time(iter_engines: Engine) -> None:
 @pytest.mark.parametrize("dst_std_time", [False, True])
 @pytest.mark.parametrize("interpolate_fallback", [False, True])
 def test_industrial_time_mapping(
-    iter_engines: Engine,
+    iter_backends: IbisBackend,
     interval_shift: bool,
     dst_std_time: bool,
     interpolate_fallback: bool,
@@ -263,7 +254,7 @@ def test_industrial_time_mapping(
             daylight_saving_adjustment=DaylightSavingAdjustmentType.DROP_SPRING_FORWARD_DUPLICATE_FALLBACK
         )
     run_test(
-        iter_engines,
+        iter_backends,
         src_df,
         src_schema,
         dst_schema,
@@ -272,7 +263,7 @@ def test_industrial_time_mapping(
         wrap_time_allowed=True,
     )
 
-    dfo = get_output_table(iter_engines, dst_schema)
+    dfo = get_output_table(iter_backends, dst_schema)
     dfo = dfo.sort_values(by=["time_zone", "value"]).reset_index(drop=True)
 
     # Check value associated with springforward hour is dropped
@@ -306,7 +297,7 @@ def test_industrial_time_mapping(
 @pytest.mark.parametrize("dst_std_time", [False, True])
 @pytest.mark.parametrize("interpolate_fallback", [False, True])
 def test_industrial_time_subhourly(
-    iter_engines: Engine,
+    iter_backends: IbisBackend,
     dst_std_time: bool,
     interpolate_fallback: bool,
 ) -> None:
@@ -323,7 +314,7 @@ def test_industrial_time_subhourly(
             daylight_saving_adjustment=DaylightSavingAdjustmentType.DROP_SPRING_FORWARD_DUPLICATE_FALLBACK
         )
     run_test(
-        iter_engines,
+        iter_backends,
         src_df,
         src_schema,
         dst_schema,
@@ -332,7 +323,7 @@ def test_industrial_time_subhourly(
         wrap_time_allowed=True,
     )
 
-    dfo = get_output_table(iter_engines, dst_schema)
+    dfo = get_output_table(iter_backends, dst_schema)
     dfo = dfo.sort_values(by=["time_zone", "timestamp"]).reset_index(drop=True)
     dfo.loc[dfo["timestamp"].dt.date.astype(str) == "2018-11-04"]
 
