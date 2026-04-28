@@ -357,3 +357,28 @@ def test_localize_time_zone_by_column_missing_tz_column_error(
     run_localization_by_column_with_error(
         iter_all_backends, df, from_schema, error, time_zone_column=None
     )
+
+
+def test_localize_time_zone_by_column_rejects_none_sentinel(
+    iter_all_backends: IbisBackend,
+) -> None:
+    """The literal string 'None' (the get_tzname(None) sentinel) in
+    time_zone_column must produce a clear InvalidParameter pointing the
+    user to localize_time_zone(None), not crash with
+    ZoneInfoNotFoundError on ZoneInfo('None').
+    """
+    # Ingest with a plain DatetimeRange so __init__ goes through
+    # _get_time_zones() (the path that scans the table for distinct
+    # zones), not the DatetimeRangeWithTZColumn path that trusts the
+    # schema's time_zones field.
+    from_schema = get_datetime_schema(2018, None, TimeIntervalType.PERIOD_BEGINNING, "base_table")
+    df = generate_datetime_dataframe(from_schema)
+    df["time_zone"] = "None"
+    ingest_data(iter_all_backends, df, from_schema)
+
+    with pytest.raises(InvalidParameter, match="Use localize_time_zone\\(None\\)"):
+        TimeZoneLocalizerByColumn(
+            iter_all_backends,
+            from_schema,
+            time_zone_column="time_zone",
+        )

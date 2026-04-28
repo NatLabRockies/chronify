@@ -1,6 +1,7 @@
 """SQLite backend implementation for Ibis."""
 
 import sqlite3
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from functools import singledispatchmethod
@@ -150,8 +151,8 @@ class SQLiteBackend(IbisBackend):
 
         ordered = data.loc[:, columns]
         rows = [tuple(_adapt_value(v) for v in row) for row in ordered.itertuples(index=False)]
-        cursor = con.cursor()
-        cursor.executemany(sql, rows)
+        with closing(con.cursor()) as cursor:
+            cursor.executemany(sql, rows)
         self._commit_if_needed()
         logger.trace("Inserted {} rows into {}", len(data), name)
 

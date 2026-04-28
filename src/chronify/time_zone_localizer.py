@@ -376,16 +376,25 @@ class TimeZoneLocalizerByColumn(TimeZoneLocalizerBase):
             self.time_zone_column
         ].to_list()
 
-        if "None" in time_zones and len(time_zones) > 1:
+        # ``"None"`` is the canonical string sentinel for tz-naive rows
+        # (``get_tzname(None) == "None"``). Reject it here regardless of
+        # whether it is alone or mixed: mixed because databases cannot
+        # store tz-aware and tz-naive timestamps in the same column;
+        # alone because the all-tz-naive case is degenerate for
+        # localize_time_zone_by_column — the caller should use
+        # localize_time_zone(None) instead. Without this check the
+        # all-"None" branch falls through to ``ZoneInfo("None")`` and
+        # raises ``ZoneInfoNotFoundError``.
+        if "None" in time_zones:
             msg = (
-                "Chronify does not support mix of None and time zones in time_zone_column."
-                "This is because databases do not support tz-aware and tz-naive timestamps "
-                f"in the same column: {time_zones}"
+                "Chronify does not support the 'None' time zone in time_zone_column. "
+                "Use localize_time_zone(None) for tz-naive rows. Mixing 'None' with "
+                "real time zones is also unsupported because databases cannot store "
+                f"tz-aware and tz-naive timestamps in the same column: {time_zones}"
             )
             raise InvalidParameter(msg)
 
-        time_zones = [ZoneInfo(tz) for tz in time_zones]
-        return time_zones
+        return [ZoneInfo(tz) for tz in time_zones]
 
     def _create_mapping(self) -> tuple[pd.DataFrame, MappingTableSchema]:
         assert isinstance(self._from_schema.time_config, DatetimeRangeWithTZColumn)
