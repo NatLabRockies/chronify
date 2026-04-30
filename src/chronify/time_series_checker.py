@@ -234,14 +234,20 @@ def check_timestamp_lists(
     expected: list[pd.Timestamp] | list[datetime],
     msg_prefix: str = "",
 ) -> None:
-    match = actual == expected
+    if actual == expected:
+        return
     msg = msg_prefix
-    if not match:
-        if len(actual) != len(expected):
-            msg += f"Mismatch number of timestamps: actual: {len(actual)} vs. expected: {len(expected)}\n"
-        missing = set(expected).difference(set(actual))
-        extra = set(actual).difference(set(expected))
-        msg += "Actual timestamps do not match expected timestamps. \n"
-        msg += f"Missing: {missing} \n"
-        msg += f"Extra: {extra}"
-        raise InvalidTable(msg)
+    if len(actual) != len(expected):
+        msg += f"Mismatch number of timestamps: actual: {len(actual)} vs. expected: {len(expected)}\n"
+    missing = sorted(set(expected).difference(actual))
+    extra = sorted(set(actual).difference(expected))
+    msg += "Actual timestamps do not match expected timestamps.\n"
+    msg += f"Missing ({len(missing)}): {_summarize_timestamps(missing)}\n"
+    msg += f"Extra ({len(extra)}): {_summarize_timestamps(extra)}"
+    raise InvalidTable(msg)
+
+
+def _summarize_timestamps(items: list, head: int = 5, tail: int = 5) -> list:
+    if len(items) <= head + tail:
+        return items
+    return list(items[:head]) + ["..."] + list(items[-tail:])
