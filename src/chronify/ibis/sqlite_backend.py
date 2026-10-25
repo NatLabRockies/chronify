@@ -31,7 +31,7 @@ def _adapt_value(v: Any) -> Any:
     Python 3.12+ DeprecationWarning about the default datetime adapter.
     Returns None for pd.NaT and other missing-value sentinels.
     """
-    if v is pd.NaT or v is None:
+    if v is None or (pd.api.types.is_scalar(v) and pd.isna(v)):
         return None
     if isinstance(v, datetime):
         return v.isoformat()
@@ -130,9 +130,20 @@ class SQLiteBackend(IbisBackend):
         if isinstance(obj, ibis.Table):
             # SQLite CREATE TABLE AS SELECT loses datetime type info.
             # Execute the expression first, then create from the DataFrame.
-            df = self._connection.execute(obj)
-            return self._connection.create_table(name, obj=df, overwrite=overwrite)
-        return self._connection.create_table(name, obj=obj, schema=schema, overwrite=overwrite)
+            obj = self._connection.execute(obj)
+        elif isinstance(obj, pa.Table):
+            obj = obj.to_pandas()
+        if obj is None:
+            return self._connection.create_table(name, schema=schema, overwrite=overwrite)
+        # ibis binds DataFrame values directly and sqlite3 rejects NaT, so create
+        # the empty table from the inferred schema and fill it via insert(), which
+        # adapts missing values and timestamps.
+        with self.transaction():
+            table = self._connection.create_table(
+                name, schema=schema or ibis.memtable(obj).schema(), overwrite=overwrite
+            )
+            self.insert(name, obj)
+        return table
 
     def insert(self, name: str, data: pd.DataFrame | pa.Table | ibis.Table) -> None:
         if isinstance(data, ibis.Table):

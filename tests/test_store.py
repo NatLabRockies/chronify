@@ -1413,3 +1413,34 @@ def test_migrate_legacy_sqlite_timestamps(tmp_path):
     store = Store.load_from_file(path, backend_name="sqlite")
     assert store.backend.migrate_legacy_timestamps({}) == []
     store.dispose()
+
+
+@pytest.mark.parametrize("tz", [None, ZoneInfo("Etc/GMT+5")])
+def test_ingest_null_timestamps_on_create(iter_stores_by_engine: Store, tz):
+    """NULL timestamps in the first ingest (CREATE TABLE path) must be stored as NULL."""
+    store = iter_stores_by_engine
+    schema = TableSchema(
+        name="nulls",
+        time_config=DatetimeRange(
+            time_column="timestamp",
+            start=datetime(2020, 1, 1, tzinfo=tz),
+            length=3,
+            resolution=timedelta(hours=1),
+        ),
+        time_array_id_columns=["id"],
+        value_column="value",
+    )
+    timestamps = pd.Series(pd.date_range("2020-01-01", periods=3, freq="h", tz=tz))
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.concat([timestamps, pd.Series([pd.NaT])], ignore_index=True),
+            "id": [1, 1, 1, 2],
+            "value": [1.0, 2.0, 3.0, np.nan],
+        }
+    )
+    assert store.ingest_table(df, schema)
+    result = store.read_table("nulls").execute()
+    assert len(result) == 4
+    assert result["timestamp"].isna().sum() == 1
+    assert result["value"].isna().sum() == 1
+    store.check_timestamps("nulls")
