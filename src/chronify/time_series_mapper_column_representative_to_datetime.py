@@ -1,6 +1,5 @@
 from typing import Optional, Generator
 import re
-import uuid
 from pathlib import Path
 import pandas as pd
 from datetime import datetime
@@ -21,6 +20,7 @@ from chronify.time_configs import (
 )
 from chronify.datetime_range_generator import DatetimeRangeGenerator
 from chronify.models import MappingTableSchema, TableSchema
+from chronify.utils.sql import make_temp_view_name
 
 
 class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
@@ -128,9 +128,8 @@ class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
 
     def _intermediate_mapping_ymdp_to_ymdh(self) -> TableSchema:
         """Convert ymdp to ymdh for intermediate mapping."""
-        uid = uuid.uuid4().hex[:8]
-        mapping_table_name = f"_int_ymdp_to_ymdh_{uid}"
-        intermediate_ymdh_table_name = f"_int_ymdh_{uid}"
+        mapping_table_name = make_temp_view_name("_int_ymdp_to_ymdh")
+        intermediate_ymdh_table_name = make_temp_view_name("_int_ymdh")
         period_col = self._from_time_config.hour_columns[0]
 
         # Get distinct periods

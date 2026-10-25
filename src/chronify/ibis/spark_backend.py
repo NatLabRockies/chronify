@@ -1,6 +1,5 @@
 """Spark backend implementation for Ibis."""
 
-import uuid
 import shutil
 from contextlib import contextmanager
 from typing import Any, Generator
@@ -17,6 +16,7 @@ from chronify.exceptions import ConflictingInputsError, InvalidOperation, Invali
 from chronify.ibis.base import IbisBackend, ObjectType, _DATETIME_RANGES
 from chronify.time import TimeDataType
 from chronify.time_configs import TimeBaseModel
+from chronify.utils.sql import make_temp_view_name
 
 
 class SparkBackend(IbisBackend):
@@ -145,7 +145,7 @@ class SparkBackend(IbisBackend):
 
     def _overwrite_without_deleted_rows(self, name: str, where: str, args: dict[str, Any]) -> None:
         quoted_name = _quote_identifier(name)
-        tmp_name = f"__chronify_delete_{uuid.uuid4().hex}"
+        tmp_name = make_temp_view_name("__chronify_delete")
         quoted_tmp = _quote_identifier(tmp_name)
         try:
             self._session.sql(

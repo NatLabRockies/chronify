@@ -1480,17 +1480,30 @@ def test_map_time_fails_if_destination_exists(iter_stores_by_engine: Store, tmp_
     store.ingest_table(_hourly_frame(src, 1), src)
     store.ingest_table(_hourly_frame(dst, 99), dst)
 
-    for kwargs in ({}, {"output_file": tmp_path / "a.parquet", "check_mapped_timestamps": True}):
-        with pytest.raises(TableAlreadyExists):
-            map_time(store.backend, src, dst, **kwargs)
-        assert store.read_table("dst").execute()["id"].unique().tolist() == [99]
-    assert not (tmp_path / "a.parquet").exists()
-
-    # Writing only to Parquet never touches the database table of the same name.
-    out = tmp_path / "b.parquet"
-    map_time(store.backend, src, dst, output_file=out)
-    assert pd.read_parquet(out)["id"].unique().tolist() == [1]
+    with pytest.raises(TableAlreadyExists):
+        map_time(store.backend, src, dst)
     assert store.read_table("dst").execute()["id"].unique().tolist() == [99]
+
+    # Writing to Parquet never touches the database table of the same name.
+    for check in (False, True):
+        out = tmp_path / f"{check}.parquet"
+        map_time(store.backend, src, dst, output_file=out, check_mapped_timestamps=check)
+        assert pd.read_parquet(out)["id"].unique().tolist() == [1]
+        assert store.read_table("dst").execute()["id"].unique().tolist() == [99]
+
+
+def test_map_time_keeps_table_named_like_mapping_table(iter_stores_by_engine: Store):
+    from chronify.time_series_mapper import map_time
+
+    store = iter_stores_by_engine
+    src = _hourly_schema("src", ZoneInfo("Etc/GMT+5"))
+    dst = _hourly_schema("dst", ZoneInfo("US/Eastern"))
+    store.ingest_table(_hourly_frame(src, 1), src)
+    store.backend.create_table("mapping_table", pd.DataFrame({"x": [1]}))
+
+    map_time(store.backend, src, dst)
+    assert store.backend.has_table("dst")
+    assert store.backend.execute(store.backend.table("mapping_table"))["x"].tolist() == [1]
 
 
 def test_map_index_time_twice_drops_intermediate(iter_stores_by_engine: Store):
@@ -1517,4 +1530,4 @@ def test_map_index_time_twice_drops_intermediate(iter_stores_by_engine: Store):
             src.name, _hourly_schema(name, ZoneInfo("Etc/GMT+5")), check_mapped_timestamps=True
         )
         assert len(store.read_table(name).execute()) == 24
-    assert not any(t.endswith("_intermediate") for t in store.backend.list_tables())
+    assert not any("_intermediate" in t for t in store.backend.list_tables())

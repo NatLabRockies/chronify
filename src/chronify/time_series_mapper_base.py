@@ -13,6 +13,7 @@ from chronify.time_series_checker import check_timestamps
 from chronify.time import TimeIntervalType, ResamplingOperationType, AggregationType
 from chronify.time_configs import TimeBasedDataAdjustment
 from chronify.utils.path_utils import check_overwrite, delete_if_exists, to_path
+from chronify.utils.sql import make_temp_view_name
 
 
 class TimeSeriesMapperBase(abc.ABC):
@@ -100,13 +101,17 @@ def apply_mapping(  # noqa: C901
     target only after the transaction commits. A failure leaves any
     pre-existing target file untouched.
     """
-    # The mapping creates a table named to_schema.name unless it writes Parquet, and
-    # then still creates a temporary view of that name to check timestamps.
-    dst_existed = backend.has_table(to_schema.name)
-    if dst_existed and (output_file is None or check_mapped_timestamps):
+    # The only database object with a caller-visible name is the result table, which
+    # is created only when not writing Parquet. Temp objects get random names, so
+    # cleanup can drop them without dropping anything this call didn't create.
+    if output_file is None and backend.has_table(to_schema.name):
         msg = f"Destination table {to_schema.name!r} already exists"
         raise TableAlreadyExists(msg)
 
+    mapping_schema = mapping_schema.model_copy(
+        update={"name": make_temp_view_name(mapping_schema.name)}
+    )
+    check_view_name = make_temp_view_name(f"{to_schema.name}_check")
     output_path = to_path(output_file) if output_file is not None else None
     staging_path = (
         output_path.with_name(f".{output_path.name}.staging.{uuid.uuid4().hex[:8]}")
@@ -131,13 +136,15 @@ def apply_mapping(  # noqa: C901
                 output_file=staging_path,
             )
             if check_mapped_timestamps:
+                check_name = to_schema.name
                 if staging_path is not None:
                     _, created_tmp_obj = backend.create_view_from_parquet(
-                        str(staging_path), to_schema.name
+                        str(staging_path), check_view_name
                     )
+                    check_name = check_view_name
                 check_timestamps(
                     backend,
-                    to_schema.name,
+                    check_name,
                     to_schema,
                     leap_day_adjustment=data_adjustment.leap_day_adjustment,
                 )
@@ -146,9 +153,9 @@ def apply_mapping(  # noqa: C901
             # is temp only when we created it for the timestamp check.
             backend.drop_table(mapping_schema.name)
             if created_tmp_obj is ObjectType.TABLE:
-                backend.drop_table(to_schema.name)
+                backend.drop_table(check_view_name)
             elif created_tmp_obj is ObjectType.VIEW:
-                backend.drop_view(to_schema.name)
+                backend.drop_view(check_view_name)
         # Promote the staged parquet only after the transaction commits.
         # When the target already exists, do a backup-rename-replace dance
         # rather than a delete-then-rename so the original is preserved if
@@ -205,13 +212,18 @@ def apply_mapping(  # noqa: C901
                 "Failed to drop mapping table {} during cleanup.", mapping_schema.name
             )
         try:
-            if not dst_existed and backend.has_table(to_schema.name):
+            if backend.has_table(check_view_name):
                 if created_tmp_obj is ObjectType.VIEW:
-                    backend.drop_view(to_schema.name)
+                    backend.drop_view(check_view_name)
                 else:
-                    backend.drop_table(to_schema.name)
+                    backend.drop_table(check_view_name)
         except Exception:
-            logger.exception("Failed to drop result table/view {} during cleanup.", to_schema.name)
+            logger.exception("Failed to drop check view {} during cleanup.", check_view_name)
+        try:
+            if output_file is None and backend.has_table(to_schema.name):
+                backend.drop_table(to_schema.name)
+        except Exception:
+            logger.exception("Failed to drop result table {} during cleanup.", to_schema.name)
         # Remove the staging output (file or directory); the original target
         # is untouched because the rename never ran.
         if staging_path is not None:
