@@ -8,6 +8,7 @@ from functools import singledispatchmethod
 from typing import Any, Iterable
 
 import ibis
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 from loguru import logger
@@ -29,7 +30,8 @@ def _adapt_value(v: Any) -> Any:
 
     Converts datetime/Timestamp objects to ISO-format strings to avoid the
     Python 3.12+ DeprecationWarning about the default datetime adapter.
-    Returns None for pd.NaT and other missing-value sentinels.
+    Returns None for pd.NaT and other missing-value sentinels, and converts
+    numpy scalars to Python scalars.
     """
     if v is None or (pd.api.types.is_scalar(v) and pd.isna(v)):
         return None
@@ -37,6 +39,9 @@ def _adapt_value(v: Any) -> Any:
         return v.isoformat()
     if hasattr(v, "isoformat"):
         return v.isoformat()
+    # sqlite3 binds numpy integers (e.g., from nullable Int64 columns) as BLOBs.
+    if isinstance(v, (np.number, np.bool_)):
+        return v.item()
     return v
 
 

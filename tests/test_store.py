@@ -712,9 +712,9 @@ def test_delete_rows_keeps_null_ids(iter_stores_by_engine: Store):
     store = iter_stores_by_engine
     schema = _hourly_schema("t", ZoneInfo("UTC"), length=2)
     df = pd.concat([_hourly_frame(schema, i) for i in (1, 2, 3)], ignore_index=True)
-    df["id"] = [None if i == 3 else i for i in df["id"]]
+    df["id"] = df["id"].astype("Int64").replace(3, pd.NA)
     store.ingest_table(df, schema)
-    assert store.delete_rows(schema.name, {"id": 1}) == 2
+    assert store.delete_rows(schema.name, {"id": np.int64(1)}) == 2
     ids = store.read_table(schema.name).execute()["id"]
     assert sorted(ids.dropna().tolist()) == [2, 2]
     assert ids.isna().sum() == 2

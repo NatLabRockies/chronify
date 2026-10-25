@@ -4,6 +4,7 @@ from typing import Any, Optional, cast
 from datetime import tzinfo
 
 import ibis
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 from loguru import logger
@@ -1168,6 +1169,11 @@ class Store:
             )
             raise InvalidParameter(msg)
 
+        # Backend drivers can't bind numpy scalars, e.g., values from df["id"].unique().
+        time_array_id_values = {
+            k: v.item() if isinstance(v, np.generic) else v
+            for k, v in time_array_id_values.items()
+        }
         # Build the predicate using ibis (safe -- no string interpolation).
         table = self._backend.table(name)
         predicates = [table[column] == value for column, value in time_array_id_values.items()]
