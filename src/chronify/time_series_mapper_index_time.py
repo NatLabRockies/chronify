@@ -118,16 +118,19 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
             check_mapped_timestamps=False,
         )
 
-        MapperDatetimeToDatetime(
-            self._backend,
-            mapped_schema,
-            self._to_schema,
-            self._data_adjustment,
-            self._wrap_time_allowed,
-        ).map_time(
-            output_file=output_file,
-            check_mapped_timestamps=check_mapped_timestamps,
-        )
+        try:
+            MapperDatetimeToDatetime(
+                self._backend,
+                mapped_schema,
+                self._to_schema,
+                self._data_adjustment,
+                self._wrap_time_allowed,
+            ).map_time(
+                output_file=output_file,
+                check_mapped_timestamps=check_mapped_timestamps,
+            )
+        finally:
+            self._backend.drop_table(mapped_schema.name)
 
     def _create_intermediate_schema(self) -> TableSchema:
         """Create the intermediate table schema for converting index time to its represented datetime"""

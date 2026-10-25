@@ -8,7 +8,7 @@ from loguru import logger
 
 from chronify.ibis.base import IbisBackend, ObjectType
 from chronify.models import TableSchema, MappingTableSchema
-from chronify.exceptions import ConflictingInputsError, InvalidOperation
+from chronify.exceptions import ConflictingInputsError, InvalidOperation, TableAlreadyExists
 from chronify.time_series_checker import check_timestamps
 from chronify.time import TimeIntervalType, ResamplingOperationType, AggregationType
 from chronify.time_configs import TimeBasedDataAdjustment
@@ -100,6 +100,13 @@ def apply_mapping(  # noqa: C901
     target only after the transaction commits. A failure leaves any
     pre-existing target file untouched.
     """
+    # The mapping creates a table named to_schema.name unless it writes Parquet, and
+    # then still creates a temporary view of that name to check timestamps.
+    dst_existed = backend.has_table(to_schema.name)
+    if dst_existed and (output_file is None or check_mapped_timestamps):
+        msg = f"Destination table {to_schema.name!r} already exists"
+        raise TableAlreadyExists(msg)
+
     output_path = to_path(output_file) if output_file is not None else None
     staging_path = (
         output_path.with_name(f".{output_path.name}.staging.{uuid.uuid4().hex[:8]}")
@@ -198,7 +205,7 @@ def apply_mapping(  # noqa: C901
                 "Failed to drop mapping table {} during cleanup.", mapping_schema.name
             )
         try:
-            if backend.has_table(to_schema.name):
+            if not dst_existed and backend.has_table(to_schema.name):
                 if created_tmp_obj is ObjectType.VIEW:
                     backend.drop_view(to_schema.name)
                 else:
@@ -300,4 +307,4 @@ def _apply_mapping(  # noqa: C901
         backend.write_parquet(result, str(output_file))
         return
 
-    backend.create_table(to_schema.name, result, overwrite=True)
+    backend.create_table(to_schema.name, result)

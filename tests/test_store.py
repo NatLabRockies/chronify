@@ -1444,3 +1444,77 @@ def test_ingest_null_timestamps_on_create(iter_stores_by_engine: Store, tz):
     assert result["timestamp"].isna().sum() == 1
     assert result["value"].isna().sum() == 1
     store.check_timestamps("nulls")
+
+
+def _hourly_schema(name: str, tz: tzinfo | None, length: int = 24) -> TableSchema:
+    return TableSchema(
+        name=name,
+        time_config=DatetimeRange(
+            time_column="timestamp",
+            start=datetime(2020, 1, 1, tzinfo=tz),
+            length=length,
+            resolution=timedelta(hours=1),
+        ),
+        time_array_id_columns=["id"],
+        value_column="value",
+    )
+
+
+def _hourly_frame(schema: TableSchema, id_: int) -> pd.DataFrame:
+    config = schema.time_config
+    return pd.DataFrame(
+        {
+            "timestamp": pd.date_range(config.start, periods=config.length, freq="h"),
+            "id": id_,
+            "value": np.arange(float(config.length)),
+        }
+    )
+
+
+def test_map_time_fails_if_destination_exists(iter_stores_by_engine: Store, tmp_path):
+    from chronify.time_series_mapper import map_time
+
+    store = iter_stores_by_engine
+    src = _hourly_schema("src", ZoneInfo("Etc/GMT+5"))
+    dst = _hourly_schema("dst", ZoneInfo("US/Eastern"))
+    store.ingest_table(_hourly_frame(src, 1), src)
+    store.ingest_table(_hourly_frame(dst, 99), dst)
+
+    for kwargs in ({}, {"output_file": tmp_path / "a.parquet", "check_mapped_timestamps": True}):
+        with pytest.raises(TableAlreadyExists):
+            map_time(store.backend, src, dst, **kwargs)
+        assert store.read_table("dst").execute()["id"].unique().tolist() == [99]
+    assert not (tmp_path / "a.parquet").exists()
+
+    # Writing only to Parquet never touches the database table of the same name.
+    out = tmp_path / "b.parquet"
+    map_time(store.backend, src, dst, output_file=out)
+    assert pd.read_parquet(out)["id"].unique().tolist() == [1]
+    assert store.read_table("dst").execute()["id"].unique().tolist() == [99]
+
+
+def test_map_index_time_twice_drops_intermediate(iter_stores_by_engine: Store):
+    from chronify.time_configs import IndexTimeRange
+
+    store = iter_stores_by_engine
+    src = TableSchema(
+        name="index_src",
+        time_config=IndexTimeRange(
+            time_column="index_time",
+            start=1,
+            length=24,
+            start_timestamp=pd.Timestamp("2020-01-01 00:00"),
+            resolution=timedelta(hours=1),
+            interval_type=TimeIntervalType.PERIOD_BEGINNING,
+        ),
+        time_array_id_columns=["id"],
+        value_column="value",
+    )
+    df = pd.DataFrame({"index_time": range(1, 25), "id": 1, "value": np.arange(24.0)})
+    store.ingest_table(df, src)
+    for name in ("out1", "out2"):
+        store.map_table_time_config(
+            src.name, _hourly_schema(name, ZoneInfo("Etc/GMT+5")), check_mapped_timestamps=True
+        )
+        assert len(store.read_table(name).execute()) == 24
+    assert not any(t.endswith("_intermediate") for t in store.backend.list_tables())
