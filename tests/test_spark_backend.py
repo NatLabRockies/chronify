@@ -426,3 +426,48 @@ def test_spark_backend_accepts_non_utc_session() -> None:
             session.conf.unset("spark.sql.session.timeZone")
         else:
             session.conf.set("spark.sql.session.timeZone", prev_tz)
+
+
+def test_spark_backend_warehouse_dir(tmp_path: Path) -> None:
+    """Tables chronify creates are stored under warehouse_dir."""
+    _require_java_home()
+    pyspark = pytest.importorskip("pyspark.sql")
+    from chronify.exceptions import ConflictingInputsError, InvalidParameter
+
+    # warehouse_dir is static per Spark session; start from a clean slate.
+    active = pyspark.SparkSession.getActiveSession()
+    if active is not None:
+        active.stop()
+
+    warehouse_dir = tmp_path / "warehouse"
+    backend = SparkBackend(warehouse_dir=warehouse_dir)
+    try:
+        store = Store(backend=backend)
+        schema = TableSchema(
+            name="devices",
+            value_column="value",
+            time_config=DatetimeRange(
+                time_column="timestamp",
+                start=datetime(2020, 1, 1),
+                length=3,
+                resolution=timedelta(hours=1),
+            ),
+            time_array_id_columns=["id"],
+        )
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2020-01-01", periods=3, freq="h", unit="us"),
+                "id": 1,
+                "value": [1.0, 2.0, 3.0],
+            }
+        )
+        store.ingest_table(df, schema)
+        assert (warehouse_dir / "devices").is_dir()
+
+        # The running session can't switch warehouses; refuse rather than ignore.
+        with pytest.raises(InvalidParameter, match="warehouse_dir"):
+            SparkBackend(warehouse_dir=tmp_path / "other")
+        with pytest.raises(ConflictingInputsError):
+            SparkBackend(session=backend._session, warehouse_dir=warehouse_dir)
+    finally:
+        backend.dispose()

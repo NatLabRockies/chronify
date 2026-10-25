@@ -13,7 +13,7 @@ import pandas as pd
 import pyarrow as pa
 from loguru import logger
 
-from chronify.exceptions import InvalidOperation
+from chronify.exceptions import ConflictingInputsError, InvalidOperation, InvalidParameter
 from chronify.ibis.base import IbisBackend, ObjectType, _DATETIME_RANGES
 from chronify.time import TimeDataType
 from chronify.time_configs import TimeBaseModel
@@ -25,7 +25,13 @@ class SparkBackend(IbisBackend):
     Requires pyspark to be installed (pip install chronify[spark]).
     """
 
-    def __init__(self, session: Any = None, *, owns_session: bool | None = None) -> None:
+    def __init__(
+        self,
+        session: Any = None,
+        *,
+        owns_session: bool | None = None,
+        warehouse_dir: str | Path | None = None,
+    ) -> None:
         """Construct a SparkBackend.
 
         Parameters
@@ -37,6 +43,13 @@ class SparkBackend(IbisBackend):
         owns_session
             Override whether ``dispose()`` stops ``session``. Defaults to
             ``True`` only when ``session`` is not provided.
+        warehouse_dir
+            Directory where Spark stores the tables chronify creates, including
+            intermediate tables while mapping (``spark.sql.warehouse.dir``).
+            Spark defaults to ``spark-warehouse`` in the current directory. On a
+            multi-node cluster this must be on a filesystem shared by all nodes.
+            Only applies when this backend creates the session; for a
+            pre-existing session, configure ``spark.sql.warehouse.dir`` on it.
         """
         try:
             from pyspark.sql import SparkSession
@@ -44,17 +57,36 @@ class SparkBackend(IbisBackend):
             msg = "pyspark is required for SparkBackend. Install with: pip install chronify[spark]"
             raise ImportError(msg) from e
 
+        if session is not None and warehouse_dir is not None:
+            msg = (
+                "warehouse_dir cannot be combined with session; "
+                "set spark.sql.warehouse.dir when building the session instead"
+            )
+            raise ConflictingInputsError(msg)
+
         self._in_transaction = False
         self._owns_session = session is None if owns_session is None else owns_session
         if session is None:
-            session = (
+            builder = (
                 SparkSession.builder.master("local")
                 .config("spark.sql.session.timeZone", "UTC")
                 .config("spark.sql.parquet.outputTimestampType", "TIMESTAMP_MICROS")
                 .config("spark.sql.execution.arrow.pyspark.enabled", "true")
-                .getOrCreate()
             )
+            if warehouse_dir is not None:
+                builder = builder.config(
+                    "spark.sql.warehouse.dir", str(Path(warehouse_dir).resolve())
+                )
+            session = builder.getOrCreate()
         self._session = session
+        if warehouse_dir is not None and self._warehouse_path() != Path(warehouse_dir).resolve():
+            # getOrCreate() returns an already-running session unchanged, and the
+            # warehouse location cannot be changed after a session starts.
+            msg = (
+                f"Requested warehouse_dir={warehouse_dir} but the active Spark session "
+                f"uses {self._warehouse_path()}. Stop the existing session first."
+            )
+            raise InvalidParameter(msg)
         # Arrow preserves TIMESTAMP instants across pandas boundaries; the
         # non-Arrow path converts through JVM Calendar and mis-resolves DST
         # fall-back values (e.g. 2012-11-04 UTC 07:00 collapses into 08:00).
@@ -164,14 +196,17 @@ class SparkBackend(IbisBackend):
         msg = "backup is not supported for the Spark backend"
         raise InvalidOperation(msg)
 
-    def _remove_managed_table_location(self, name: str) -> None:
+    def _warehouse_path(self) -> Path:
         location = str(self._session.conf.get("spark.sql.warehouse.dir", "spark-warehouse"))
         parsed = urlparse(location)
         if parsed.scheme == "file":
-            warehouse = Path(unquote(parsed.path))
-        else:
-            warehouse = Path(location)
-        path = warehouse / name
+            return Path(unquote(parsed.path)).resolve()
+        if not parsed.scheme:
+            return Path(location).resolve()
+        return Path(location)
+
+    def _remove_managed_table_location(self, name: str) -> None:
+        path = self._warehouse_path() / name
         if path.exists():
             shutil.rmtree(path)
 

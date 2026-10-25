@@ -76,6 +76,36 @@ session = SparkSession.builder.master("local").getOrCreate()
 store = Store(backend=SparkBackend(session=session))
 ```
 
+### Warehouse directory
+Spark stores the tables that chronify creates, including the intermediate tables it builds while
+mapping time, in its warehouse directory. Spark defaults to `spark-warehouse` in the current
+working directory. On a multi-node cluster, such as an HPC, the warehouse must be on a filesystem
+that every node can access, not on node-local storage like `/tmp`.
+
+Set it with `warehouse_dir`:
+```python
+store = Store(backend=SparkBackend(warehouse_dir="/scratch/my_user/spark-warehouse"))
+```
+
+If you pass your own session, set `spark.sql.warehouse.dir` when you build it instead.
+`warehouse_dir` cannot be combined with `session`:
+```python
+session = (
+    SparkSession.builder.master("local")
+    .config("spark.sql.warehouse.dir", "/scratch/my_user/spark-warehouse")
+    .getOrCreate()
+)
+store = Store(backend=SparkBackend(session=session))
+```
+
+Spark fixes the warehouse location when a session starts. If a session is already running with a
+different warehouse, `SparkBackend(warehouse_dir=...)` raises an error. Stop that session first.
+
+```{note}
+This replaces the `scratch_dir` argument from chronify 0.7 and earlier, which controlled where
+the Hive backend wrote temporary Parquet files.
+```
+
 Verify the data:
 ```python
 store.read_table(schema.name).execute().head()
