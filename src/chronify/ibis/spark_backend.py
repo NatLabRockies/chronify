@@ -150,7 +150,8 @@ class SparkBackend(IbisBackend):
         try:
             self._session.sql(
                 f"CREATE TABLE {quoted_tmp} AS "
-                f"SELECT * FROM {quoted_name} WHERE NOT ({where})",
+                # Keep rows where the predicate is NULL, as DELETE would.
+                f"SELECT * FROM {quoted_name} WHERE coalesce(NOT ({where}), true)",
                 args=args,
             )
             self._session.sql(f"INSERT OVERWRITE TABLE {quoted_name} SELECT * FROM {quoted_tmp}")

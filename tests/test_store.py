@@ -708,6 +708,18 @@ def test_delete_rows(iter_stores_by_engine: Store, one_week_per_month_by_hour_ta
         store.delete_rows(schema.name, {"id": 3})
 
 
+def test_delete_rows_keeps_null_ids(iter_stores_by_engine: Store):
+    store = iter_stores_by_engine
+    schema = _hourly_schema("t", ZoneInfo("UTC"), length=2)
+    df = pd.concat([_hourly_frame(schema, i) for i in (1, 2, 3)], ignore_index=True)
+    df["id"] = [None if i == 3 else i for i in df["id"]]
+    store.ingest_table(df, schema)
+    assert store.delete_rows(schema.name, {"id": 1}) == 2
+    ids = store.read_table(schema.name).execute()["id"]
+    assert sorted(ids.dropna().tolist()) == [2, 2]
+    assert ids.isna().sum() == 2
+
+
 def test_drop_table(iter_stores_by_engine: Store, one_week_per_month_by_hour_table):
     store = iter_stores_by_engine
     df, _, schema = one_week_per_month_by_hour_table

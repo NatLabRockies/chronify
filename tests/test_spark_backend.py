@@ -471,3 +471,33 @@ def test_spark_backend_warehouse_dir(tmp_path: Path) -> None:
             SparkBackend(session=backend._session, warehouse_dir=warehouse_dir)
     finally:
         backend.dispose()
+
+
+def test_spark_delete_rows_keeps_null_ids(spark_store: Store) -> None:
+    """The non-DELETE fallback must keep rows whose key is NULL, as DELETE would."""
+    schema = TableSchema(
+        name="spark_del_null",
+        value_column="value",
+        time_config=DatetimeRange(
+            time_column="timestamp",
+            start=datetime(2020, 1, 1, tzinfo=ZoneInfo("UTC")),
+            length=2,
+            resolution=timedelta(hours=1),
+            interval_type=TimeIntervalType.PERIOD_BEGINNING,
+        ),
+        time_array_id_columns=["id"],
+    )
+    df = pd.DataFrame(
+        {
+            "id": pd.array([1, 1, 2, 2, None, None], dtype="Int64"),
+            "timestamp": pd.to_datetime(
+                ["2020-01-01 00:00:00+00:00", "2020-01-01 01:00:00+00:00"] * 3, utc=True
+            ),
+            "value": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        }
+    )
+    spark_store.ingest_table(df, schema)
+    assert spark_store.delete_rows(schema.name, {"id": 1}) == 2
+    ids = spark_store.read_table(schema.name).execute()["id"]
+    assert sorted(ids.dropna().tolist()) == [2, 2]
+    assert ids.isna().sum() == 2
