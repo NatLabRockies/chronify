@@ -142,7 +142,7 @@ def test_spark_write_query_to_parquet_preserves_timestamp_tz(
 
     outfile = tmp_path / "query_tz.parquet"
     expr = spark_store.get_table(schema.name)
-    spark_store.write_query_to_parquet(expr, outfile, overwrite=True, name=schema.name)
+    spark_store.write_query_to_parquet(expr, outfile, overwrite=True)
 
     out = pd.read_parquet(outfile)
     assert pd.api.types.is_datetime64_any_dtype(out["timestamp"])

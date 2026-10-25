@@ -1093,7 +1093,6 @@ class Store:
         file_path: Path | str,
         overwrite: bool = False,
         partition_columns: Optional[list[str]] = None,
-        name: Optional[str] = None,
     ) -> None:
         """Write the result of a query to a Parquet file.
 
