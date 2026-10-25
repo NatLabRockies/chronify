@@ -1339,3 +1339,77 @@ def test_map_table_cleanup_handles_directory_staging(tmp_path, monkeypatch):
     assert not output_file.exists()
     leftover = sorted(p.name for p in tmp_path.iterdir())
     assert leftover == []
+
+
+def test_migrate_legacy_sqlite_timestamps(tmp_path):
+    """A SQLite file written by chronify <= 0.7 (SQLAlchemy) is upgraded on load."""
+    import sqlite3
+
+    def schema(name: str, tz: tzinfo | None) -> TableSchema:
+        return TableSchema(
+            name=name,
+            time_config=DatetimeRange(
+                time_column="timestamp",
+                start=datetime(2020, 1, 1, tzinfo=tz),
+                length=3,
+                resolution=timedelta(hours=1),
+            ),
+            time_array_id_columns=["id"],
+            value_column="value",
+        )
+
+    tz_schema = schema("tz", ZoneInfo("Etc/GMT+5"))
+    mapped_schema = schema("tz_mapped", ZoneInfo("Etc/GMT+5"))
+    ntz_schema = schema("ntz", None)
+    # Mimic SQLAlchemy's layout: DATETIME for created tables, NUM for CREATE TABLE AS
+    # SELECT, UTC wall clock with microseconds for tz-aware values.
+    path = tmp_path / "legacy.db"
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE schemas (name VARCHAR NOT NULL, schema VARCHAR, UNIQUE (name));
+        CREATE TABLE tz (timestamp DATETIME, id BIGINT, value DOUBLE);
+        CREATE TABLE ntz (timestamp DATETIME, id BIGINT, value DOUBLE);
+        INSERT INTO tz VALUES
+            ('2020-01-01 05:00:00.000000', 1, 1.0),
+            ('2020-01-01 06:00:00.000000', 1, 2.0),
+            ('2020-01-01 07:00:00.000000', 1, 3.0);
+        INSERT INTO ntz VALUES
+            ('2020-01-01 00:00:00.000000', 1, 1.0),
+            ('2020-01-01 01:00:00.000000', 1, 2.0),
+            ('2020-01-01 02:00:00.000000', 1, 3.0);
+        CREATE TABLE tz_mapped AS SELECT id, timestamp, value FROM tz;
+        CREATE VIEW tz_view AS SELECT tz.timestamp, tz.id, tz.value FROM tz;
+        """
+    )
+    con.executemany(
+        "INSERT INTO schemas VALUES (?, ?)",
+        [(s.name, s.model_dump_json()) for s in (tz_schema, mapped_schema, ntz_schema)],
+    )
+    con.commit()
+    con.close()
+
+    store = Store.load_from_file(path, backend_name="sqlite")
+    expected_tz = pd.date_range("2020-01-01 05:00", periods=3, freq="h", tz="UTC")
+    for name in ("tz", "tz_mapped"):
+        df = store.read_table(name).execute().sort_values("timestamp")
+        assert (df["timestamp"].dt.tz_convert("UTC").to_numpy() == expected_tz.to_numpy()).all()
+        store.check_timestamps(name)
+    df = store.read_table("ntz").execute().sort_values("timestamp")
+    assert df["timestamp"].dt.tz is None
+    assert (df["timestamp"] == pd.date_range("2020-01-01", periods=3, freq="h")).all()
+    assert len(store.read_query("SELECT * FROM tz_view").execute()) == 3
+
+    # New writes must use the same encoding so joins and appends line up.
+    store.ingest_table(
+        pd.DataFrame({"timestamp": expected_tz, "id": 2, "value": [4.0, 5.0, 6.0]}), tz_schema
+    )
+    store.check_timestamps("tz")
+    store.map_table_time_config("tz", schema("tz_out", ZoneInfo("US/Eastern")))
+    assert len(store.read_table("tz_out").execute()) == 6
+    store.dispose()
+
+    # Second load is a no-op.
+    store = Store.load_from_file(path, backend_name="sqlite")
+    assert store.backend.migrate_legacy_timestamps({}) == []
+    store.dispose()

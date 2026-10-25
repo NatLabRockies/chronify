@@ -16,14 +16,20 @@ from chronify.exceptions import (
     TableNotStored,
 )
 from chronify.csv_io import read_csv
-from chronify.ibis import IbisBackend, ObjectType, make_backend
+from chronify.ibis import IbisBackend, ObjectType, SQLiteBackend, make_backend
 from chronify.models import (
     CsvTableSchema,
     PivotedTableSchema,
     TableSchema,
 )
 from chronify.schema_manager import SchemaManager
-from chronify.time_configs import DatetimeRange, IndexTimeRangeBase, TimeBasedDataAdjustment
+from chronify.time import TimeDataType
+from chronify.time_configs import (
+    DatetimeRange,
+    DatetimeRangeWithTZColumn,
+    IndexTimeRangeBase,
+    TimeBasedDataAdjustment,
+)
 from chronify.time_series_checker import check_timestamps
 from chronify.time_series_mapper import map_time
 from chronify.time_zone_converter import TimeZoneConverter, TimeZoneConverterByColumn
@@ -64,6 +70,8 @@ class Store:
             self._backend = make_backend(name, database=database)
 
         self._schema_mgr = SchemaManager(self._backend)
+        if isinstance(self._backend, SQLiteBackend):
+            _migrate_legacy_sqlite_timestamps(self._backend, self._schema_mgr)
 
     @classmethod
     def create_in_memory_db(
@@ -1231,6 +1239,20 @@ def check_columns(
         cols = " ".join(sorted(diff))
         msg = f"These columns are defined in the schema but not present in the table: {cols}"
         raise InvalidTable(msg)
+
+
+def _migrate_legacy_sqlite_timestamps(backend: SQLiteBackend, schema_mgr: SchemaManager) -> None:
+    """Upgrade a SQLite database written by chronify <= 0.7 to the current timestamp format."""
+    time_columns: dict[str, dict[str, bool]] = {}
+    for schema in schema_mgr.list_schemas():
+        config = schema.time_config
+        if isinstance(config, (DatetimeRange, DatetimeRangeWithTZColumn)):
+            time_columns[schema.name] = {
+                config.time_column: config.dtype == TimeDataType.TIMESTAMP_TZ
+            }
+    migrated = backend.migrate_legacy_timestamps(time_columns)
+    if migrated:
+        logger.info("Migrated legacy SQLite timestamps in tables: {}", migrated)
 
 
 def _safe_cleanup_after_ingest_error(

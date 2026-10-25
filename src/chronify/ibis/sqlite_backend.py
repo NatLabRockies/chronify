@@ -277,6 +277,87 @@ class SQLiteBackend(IbisBackend):
     def _supports_parquet_partitioning(self) -> bool:
         return False
 
+    def migrate_legacy_timestamps(self, time_columns: dict[str, dict[str, bool]]) -> list[str]:
+        """Rewrite timestamps stored by chronify <= 0.7 (SQLAlchemy) into the current format.
+
+        SQLAlchemy stored timestamps as ``YYYY-MM-DD HH:MM:SS.ffffff`` (UTC wall
+        clock for tz-aware data) in ``DATETIME`` columns, or ``NUM`` columns for
+        tables built with CREATE TABLE AS SELECT. Ibis writes ISO-8601 into
+        ``TIMESTAMP`` / ``TIMESTAMPTZ`` columns. SQLite compares timestamps as
+        text, so mixing the two silently breaks joins.
+
+        Parameters
+        ----------
+        time_columns
+            Registered time columns: ``{table: {column: is_tz_aware}}``.
+
+        Returns the names of the migrated tables.
+        """
+        con = self._connection.con
+        plans: dict[str, dict[str, bool]] = {}
+        for (table,) in con.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall():
+            declared = {
+                row[1]: row[2].upper()
+                for row in con.execute(f"PRAGMA table_info({_quote_identifier(table)})")
+            }
+            registered = time_columns.get(table, {})
+            legacy = {
+                col: registered.get(col, False)
+                for col, typ in declared.items()
+                if typ == "DATETIME"
+                or (col in registered and typ not in ("TIMESTAMP", "TIMESTAMPTZ"))
+            }
+            if legacy:
+                plans[table] = legacy
+
+        if not plans:
+            return []
+
+        con.execute("PRAGMA legacy_alter_table = ON")  # don't validate views during RENAME
+        try:
+            with self.transaction():
+                for table, legacy in plans.items():
+                    self._rebuild_with_iso_timestamps(table, legacy)
+        finally:
+            con.execute("PRAGMA legacy_alter_table = OFF")
+        return list(plans)
+
+    def _rebuild_with_iso_timestamps(self, table: str, legacy: dict[str, bool]) -> None:
+        con = self._connection.con
+        columns = [
+            (row[1], row[2])
+            for row in con.execute(f"PRAGMA table_info({_quote_identifier(table)})")
+        ]
+        defs = []
+        exprs = []
+        for col, typ in columns:
+            q = _quote_identifier(col)
+            if col not in legacy:
+                defs.append(f"{q} {typ}".rstrip())
+                exprs.append(q)
+                continue
+            is_tz = legacy[col]
+            defs.append(f"{q} {'TIMESTAMPTZ' if is_tz else 'TIMESTAMP'}")
+            # Matches Python's datetime.isoformat(), which is what _adapt_value and
+            # ibis write: microseconds only when nonzero, '+00:00' for UTC.
+            iso = (
+                f"substr({q}, 1, 10) || 'T' || substr({q}, 12, 8) || "
+                f"CASE WHEN substr({q}, 21, 6) IN ('', '000000') THEN '' "
+                f"ELSE '.' || substr({q}, 21, 6) END" + (" || '+00:00'" if is_tz else "")
+            )
+            exprs.append(
+                f"CASE WHEN {q} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] "
+                f"[0-9][0-9]:[0-9][0-9]:[0-9][0-9]*' THEN {iso} ELSE {q} END"
+            )
+        tmp = _quote_identifier(f"__chronify_migrate_{table}")
+        quoted = _quote_identifier(table)
+        con.execute(f"CREATE TABLE {tmp} ({', '.join(defs)})")
+        con.execute(f"INSERT INTO {tmp} SELECT {', '.join(exprs)} FROM {quoted}")
+        con.execute(f"DROP TABLE {quoted}")
+        con.execute(f"ALTER TABLE {tmp} RENAME TO {quoted}")
+
 
 def _infer_sqlite_path(connection: ibis.BaseBackend) -> str | None:
     """Return the database file path for an ibis SQLite connection, or None for in-memory."""
