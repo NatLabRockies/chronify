@@ -27,7 +27,8 @@ Chronify uses [Ibis](https://ibis-project.org) for all database operations. The 
 backends are supported:
 
 - DuckDB (default)
-- SQLite
+- SQLite (stores timestamps as text; casting or comparing them across column types is only
+  millisecond-precise)
 - Apache Spark (via PySpark)
 
 ## How to use this guide

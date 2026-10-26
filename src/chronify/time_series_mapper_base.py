@@ -288,6 +288,8 @@ def _apply_mapping(  # noqa: C901
                 right_col = right_col.cast(left_col.type())
             # SQLite stores timestamps as ISO text, and a timestamp cast compiles to
             # STRFTIME, which changes the text format. Normalize both sides so they match.
+            # %f is milliseconds, so keys differing only below 1 ms compare equal; the
+            # cast above already truncates the same way.
             if backend.name == "sqlite" and left_col.type().is_timestamp():
                 fmt = "%Y-%m-%d %H:%M:%f"
                 left_col = left_col.strftime(fmt)
