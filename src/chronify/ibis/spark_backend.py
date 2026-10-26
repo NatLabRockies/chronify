@@ -230,7 +230,14 @@ class SparkBackend(IbisBackend):
             self._remove_managed_table_location(tmp_name)
 
     def create_view_from_parquet(self, path: str, name: str) -> tuple[ibis.Table, ObjectType]:
-        self._connection.create_view(name, self._connection.read_parquet(path))
+        # Persistent view over the file itself, unlike create_view. ibis's
+        # read_parquet would register an extra ibis_read_parquet_* temp view, and a
+        # persistent view can't reference it. Absolute path because the view may be
+        # read from a different cwd.
+        parquet_path = _quote_identifier(str(Path(path).resolve()))
+        self._session.sql(
+            f"CREATE VIEW {_quote_identifier(name)} AS SELECT * FROM parquet.{parquet_path}"
+        )
         return self.table(name), ObjectType.VIEW
 
     def write_parquet(

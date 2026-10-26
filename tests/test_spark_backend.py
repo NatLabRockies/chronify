@@ -358,12 +358,14 @@ def test_spark_create_view_from_parquet(spark_store: Store, tmp_path: Path) -> N
     assert obj_type == ObjectType.VIEW
     result = spark_store.backend.execute(table_expr)
     assert len(result) == 2
+    assert not [t for t in spark_store.list_tables() if t.startswith("ibis_")]
 
-    # Spark views are temporary, so their schemas must not be persisted.
+    # Parquet views are persistent, so their schemas are persisted.
     view_schema = schema.model_copy(update={"name": "pq_view2"})
     spark_store.create_view_from_parquet(outfile, view_schema)
     schemas = spark_store.backend.execute(spark_store.backend.table("schemas"))
-    assert "pq_view2" not in schemas["name"].tolist()
+    assert "pq_view2" in schemas["name"].tolist()
+    assert not spark_store.backend._session.catalog.getTable("pq_view2").isTemporary
     spark_store.schema_manager.rebuild_cache()
     assert spark_store.schema_manager.get_schema("pq_view2") == view_schema
     spark_store.drop_view("pq_view2")
