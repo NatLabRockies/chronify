@@ -3,6 +3,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 import os
 
+import ibis
 import pandas as pd
 import pytest
 
@@ -634,3 +635,13 @@ def test_spark_create_table_removes_stale_mixed_case_location(
     (stale / "part-0.parquet").write_bytes(b"")
     spark_store.backend.create_table("MyTable", pd.DataFrame({"x": [1]}))
     assert spark_store.backend.execute(spark_store.backend.table("MyTable"))["x"].tolist() == [1]
+
+
+def test_spark_partitioned_write_parquet_from_memtable(spark_store: Store, tmp_path: Path) -> None:
+    expr = ibis.memtable(pd.DataFrame({"a": [1, 2], "b": ["x", "y"]}))
+    outdir = tmp_path / "partitioned.parquet"
+    spark_store._backend.write_parquet(expr, str(outdir), partition_by=["b"])
+    assert (outdir / "b=x").is_dir() and (outdir / "b=y").is_dir()
+    out = pd.read_parquet(outdir).sort_values("a")
+    assert out["a"].tolist() == [1, 2]
+    assert out["b"].astype(str).tolist() == ["x", "y"]
