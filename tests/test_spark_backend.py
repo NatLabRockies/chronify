@@ -278,6 +278,10 @@ def test_spark_delete_rows(spark_store: Store) -> None:
     out = spark_store.read_table(schema.name).execute()
     assert len(out) == 2
     assert set(out["id"]) == {2}
+    spark_store.delete_rows(schema.name, {"id": 2})
+    assert not spark_store.has_table(schema.name)
+    with pytest.raises(TableNotStored):
+        spark_store.schema_manager.get_schema(schema.name)
 
 
 def test_spark_write_parquet_partitioned(spark_store: Store, tmp_path: Path) -> None:

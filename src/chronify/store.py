@@ -1191,14 +1191,10 @@ class Store:
             time_array_id_values,
         )
 
-        # Avoid an additional full distributed count on Spark. Local backends keep
-        # the historical behavior of removing the table after its final row group
-        # is deleted.
-        if self._backend.name != "spark":
-            remaining = int(cast(Any, self._backend.table(name).count().execute()))
-            if remaining == 0:
-                logger.info("Delete empty table {}", name)
-                self.drop_table(name)
+        # limit(1) avoids a full count, which matters on Spark.
+        if int(cast(Any, self._backend.table(name).limit(1).count().execute())) == 0:
+            logger.info("Delete empty table {}", name)
+            self.drop_table(name)
 
         return num_to_delete
 
