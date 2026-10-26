@@ -164,6 +164,24 @@ def test_read_raw_query_supports_non_select_statements(iter_stores_by_engine):
     assert "timestamp" in set(df["name"])
 
 
+def test_sqlite_execute_sql_to_df_in_transaction_does_not_warn():
+    """Inside a transaction, pandas must get the real sqlite3 connection, not the
+    no-commit proxy, which it doesn't recognize."""
+    import warnings
+
+    backend = make_backend("sqlite")
+    with backend.transaction(), warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert backend.execute_sql_to_df("SELECT 1 AS x")["x"].tolist() == [1]
+    backend.dispose()
+
+
+def test_make_spark_backend_rejects_database():
+    """Spark has no database file; a path must not be silently ignored."""
+    with pytest.raises(InvalidParameter, match="does not use a database file"):
+        make_backend("spark", database="my.db")
+
+
 def test_read_raw_query_supports_params(iter_stores_by_engine):
     store = iter_stores_by_engine
     schema = _make_tz_schema("raw_params")

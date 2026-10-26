@@ -38,6 +38,12 @@ def make_backend(
         case "sqlite":
             return SQLiteBackend(database=database or ":memory:", **kwargs)
         case "spark":
+            if database is not None:
+                msg = (
+                    "The Spark backend does not use a database file; "
+                    "pass warehouse_dir or a configured SparkSession instead"
+                )
+                raise InvalidParameter(msg)
             from chronify.ibis.spark_backend import SparkBackend
 
             return SparkBackend(**kwargs)

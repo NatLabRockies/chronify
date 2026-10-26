@@ -236,6 +236,15 @@ def apply_mapping(  # noqa: C901
         raise
 
 
+def drop_intermediate_table(backend: IbisBackend, name: str) -> None:
+    """Drop an intermediate table from a finally block without masking the original error."""
+    try:
+        if backend.has_table(name):
+            backend.drop_table(name)
+    except Exception:
+        logger.exception("Failed to drop intermediate table {} during cleanup.", name)
+
+
 def _apply_mapping(  # noqa: C901
     mapping_table_name: str,
     from_schema: TableSchema,

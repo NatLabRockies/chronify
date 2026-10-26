@@ -9,7 +9,11 @@ import pandas as pd
 from chronify.ibis.base import IbisBackend
 from chronify.models import TableSchema, MappingTableSchema
 from chronify.exceptions import InvalidParameter, ConflictingInputsError
-from chronify.time_series_mapper_base import TimeSeriesMapperBase, apply_mapping
+from chronify.time_series_mapper_base import (
+    TimeSeriesMapperBase,
+    apply_mapping,
+    drop_intermediate_table,
+)
 from chronify.time_configs import (
     DatetimeRange,
     IndexTimeRanges,
@@ -131,7 +135,7 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
                 check_mapped_timestamps=check_mapped_timestamps,
             )
         finally:
-            self._backend.drop_table(mapped_schema.name)
+            drop_intermediate_table(self._backend, mapped_schema.name)
 
     def _create_intermediate_schema(self) -> TableSchema:
         """Create the intermediate table schema for converting index time to its represented datetime"""

@@ -338,3 +338,31 @@ def test_industrial_time_subhourly(
     else:
         assert dfo.loc[32254:32303]["value"].value_counts()[[14739, 14740]].tolist() == [2, 2]
         assert dfo.loc[14730:14760]["value"].value_counts()[[147390, 147400]].tolist() == [2, 2]
+
+
+def test_cleanup_failure_does_not_mask_mapping_error(
+    iter_backends: IbisBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed intermediate-table drop must not replace the mapping error."""
+    from chronify.time_series_mapper_datetime import MapperDatetimeToDatetime
+
+    src_df, src_schema, dst_schema = data_for_simple_mapping()
+    backend = iter_backends
+    drop_table = backend.drop_table
+    mapping_failed = False
+
+    def fail_map_time(*args: Any, **kwargs: Any) -> None:
+        nonlocal mapping_failed
+        mapping_failed = True
+        msg = "mapping failed"
+        raise ValueError(msg)
+
+    def fail_drop_table(name: str) -> None:
+        if mapping_failed:
+            msg = "drop failed"
+            raise RuntimeError(msg)
+        drop_table(name)
+
+    monkeypatch.setattr(MapperDatetimeToDatetime, "map_time", fail_map_time)
+    monkeypatch.setattr(backend, "drop_table", fail_drop_table)
+    run_test(backend, src_df, src_schema, dst_schema, (ValueError, "mapping failed"))

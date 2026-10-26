@@ -239,7 +239,10 @@ class SQLiteBackend(IbisBackend):
 
     def execute_sql_to_df(self, query: str, params: Any = None) -> pd.DataFrame:
         logger.trace("execute_sql_to_df: {}", query)
-        return pd.read_sql_query(query, self._connection.con, params=params)
+        # Inside a transaction, .con is a _NoCommitProxy, which pandas doesn't
+        # recognize as a sqlite3 connection. Reads never commit, so the real one is safe.
+        con = self._real_con or self._connection.con
+        return pd.read_sql_query(query, con, params=params)
 
     def dispose(self) -> None:
         if self._owns_connection:

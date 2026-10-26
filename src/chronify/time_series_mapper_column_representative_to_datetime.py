@@ -8,7 +8,11 @@ from loguru import logger
 
 from chronify.exceptions import InvalidParameter, InvalidValue
 from chronify.ibis.base import IbisBackend
-from chronify.time_series_mapper_base import TimeSeriesMapperBase, apply_mapping
+from chronify.time_series_mapper_base import (
+    TimeSeriesMapperBase,
+    apply_mapping,
+    drop_intermediate_table,
+)
 from chronify.time_configs import (
     YearMonthDayHourTimeNTZ,
     YearMonthDayPeriodTimeNTZ,
@@ -106,8 +110,8 @@ class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
                 check_mapped_timestamps=check_mapped_timestamps,
             )
         finally:
-            if drop_table and self._backend.has_table(drop_table):
-                self._backend.drop_table(drop_table)
+            if drop_table:
+                drop_intermediate_table(self._backend, drop_table)
 
     def check_schema_consistency(self) -> None:
         if isinstance(self._from_time_config, MonthDayHourTimeNTZ):
