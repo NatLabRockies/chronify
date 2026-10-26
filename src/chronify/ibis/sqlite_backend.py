@@ -135,10 +135,15 @@ class SQLiteBackend(IbisBackend):
         overwrite: bool = False,
     ) -> ibis.Table:
         if isinstance(obj, ibis.Table):
-            # SQLite CREATE TABLE AS SELECT loses datetime type info.
-            # Execute the expression first, then create from the DataFrame.
-            obj = self._connection.execute(obj)
-        elif isinstance(obj, pa.Table):
+            # SQLite CREATE TABLE AS SELECT loses datetime type info, so create the
+            # table from the schema and fill it in the database.
+            with self.transaction():
+                table = self._connection.create_table(
+                    name, schema=schema or obj.schema(), overwrite=overwrite
+                )
+                self.insert(name, obj)
+            return table
+        if isinstance(obj, pa.Table):
             obj = obj.to_pandas()
         if obj is None:
             return self._connection.create_table(name, schema=schema, overwrite=overwrite)
@@ -153,18 +158,24 @@ class SQLiteBackend(IbisBackend):
         return table
 
     def insert(self, name: str, data: pd.DataFrame | pa.Table | ibis.Table) -> None:
-        if isinstance(data, ibis.Table):
-            data = data.execute()
-        elif isinstance(data, pa.Table):
+        if isinstance(data, pa.Table):
             data = data.to_pandas()
-        # Use raw SQLite cursor for parameterized inserts
         con = self._connection.con  # raw sqlite3 connection
-        table = self._connection.table(name)
-        columns = list(table.columns)
+        columns = list(self._connection.table(name).columns)
         _validate_insert_columns(name, columns, list(data.columns))
-        placeholders = ", ".join(["?"] * len(columns))
         col_list = ", ".join(_quote_identifier(c) for c in columns)
         quoted_name = _quote_identifier(name)
+        if isinstance(data, ibis.Table):
+            # Stay in the database. Timestamps are copied as the ISO text they are
+            # stored as; an expression that computes timestamps with SQLite functions
+            # would produce a different text format.
+            select = self._connection.compile(data.select(columns))
+            con.execute(f"INSERT INTO {quoted_name} ({col_list}) {select}")
+            self._commit_if_needed()
+            logger.trace("Inserted query results into {}", name)
+            return
+        # Use raw SQLite cursor for parameterized inserts
+        placeholders = ", ".join(["?"] * len(columns))
         sql = f"INSERT INTO {quoted_name} ({col_list}) VALUES ({placeholders})"
 
         ordered = data.loc[:, columns]

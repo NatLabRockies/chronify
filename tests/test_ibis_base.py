@@ -197,3 +197,43 @@ def test_execute_joins_memtable(iter_backends):
     table = backend.table("t")
     df = backend.execute(table.join(lookup, "id"))
     assert df[["id", "value", "label"]].values.tolist() == [[2, 2.0, "b"]]
+
+
+def _sqlite_rows_and_types(backend, name):
+    con = backend.connection.con
+    types = [(r[1], r[2]) for r in con.execute(f'PRAGMA table_info("{name}")')]
+    rows = con.execute(f'SELECT * FROM "{name}" ORDER BY id').fetchall()
+    return types, rows
+
+
+def test_sqlite_expression_writes_match_dataframe_writes(monkeypatch):
+    backend = make_backend("sqlite")
+    df = pd.DataFrame(
+        {
+            "id": [1, 2, 3],
+            "ts_tz": pd.to_datetime(
+                ["2020-01-01 00:00:00", "2020-01-01 01:00:00.123456", None],
+                utc=True,
+                format="ISO8601",
+            ),
+            "ts": pd.to_datetime(["2020-03-08 02:00:00", None, "2020-11-01 01:00:00"]),
+            "value": [1.5, float("nan"), 3.0],
+            "label": ["a", None, "c"],
+        }
+    )
+    backend.create_table("src", df)
+    backend.create_table("empty", schema=backend.table("src").schema())
+    expected = _sqlite_rows_and_types(backend, "src")
+
+    # Expression writes stay in the database instead of loading rows into pandas.
+    def fail(*args, **kwargs):
+        msg = "expression was materialized"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(backend.connection, "execute", fail)
+    src = backend.table("src")
+    backend.create_table("from_expr", src)
+    assert _sqlite_rows_and_types(backend, "from_expr") == expected
+
+    backend.insert("empty", src.select(list(reversed(src.columns))))
+    assert _sqlite_rows_and_types(backend, "empty") == expected
