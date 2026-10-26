@@ -4,7 +4,6 @@ from pathlib import Path
 import pandas as pd
 from datetime import datetime
 
-from loguru import logger
 
 from chronify.exceptions import InvalidParameter, InvalidValue
 from chronify.ibis.base import IbisBackend
@@ -169,14 +168,8 @@ class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
         except Exception:
             # Spark fallback: rollback is a no-op, so clean up manually.
             # Idempotent on DuckDB/SQLite where the rollback already dropped these.
-            # Each step is independently guarded so a cleanup failure cannot
-            # mask the original error.
             for tbl in (mapping_table_name, intermediate_ymdh_table_name):
-                try:
-                    if self._backend.has_table(tbl):
-                        self._backend.drop_table(tbl)
-                except Exception:
-                    logger.exception("Failed to drop intermediate table {} during cleanup.", tbl)
+                drop_intermediate_table(self._backend, tbl)
             raise
 
         assert isinstance(self._from_time_config, YearMonthDayPeriodTimeNTZ)  # for mypy

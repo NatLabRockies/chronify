@@ -204,13 +204,7 @@ def apply_mapping(  # noqa: C901
         # these objects (has_table returns False); on Spark it didn't. Each
         # step is independently guarded so a Spark connectivity failure (or
         # similar) here cannot mask the original mapping exception.
-        try:
-            if backend.has_table(mapping_schema.name):
-                backend.drop_table(mapping_schema.name)
-        except Exception:
-            logger.exception(
-                "Failed to drop mapping table {} during cleanup.", mapping_schema.name
-            )
+        drop_intermediate_table(backend, mapping_schema.name)
         try:
             if backend.has_table(check_view_name):
                 if created_tmp_obj is ObjectType.VIEW:
@@ -219,11 +213,8 @@ def apply_mapping(  # noqa: C901
                     backend.drop_table(check_view_name)
         except Exception:
             logger.exception("Failed to drop check view {} during cleanup.", check_view_name)
-        try:
-            if output_file is None and backend.has_table(to_schema.name):
-                backend.drop_table(to_schema.name)
-        except Exception:
-            logger.exception("Failed to drop result table {} during cleanup.", to_schema.name)
+        if output_file is None:
+            drop_intermediate_table(backend, to_schema.name)
         # Remove the staging output (file or directory); the original target
         # is untouched because the rename never ran.
         if staging_path is not None:
