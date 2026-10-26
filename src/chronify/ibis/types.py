@@ -1,7 +1,6 @@
 """Type conversion utilities for Ibis backends."""
 
 import ibis.expr.datatypes as dt
-import pyarrow as pa
 
 # Mapping from user-facing string type names to Ibis data types
 _COLUMN_TYPES: dict[str, dt.DataType] = {
@@ -13,23 +12,6 @@ _COLUMN_TYPES: dict[str, dt.DataType] = {
     "str": dt.String(),
     "datetime": dt.Timestamp(timezone=None),
     "datetime_tz": dt.Timestamp(timezone="UTC"),
-}
-
-# Mapping from DuckDB type names to Ibis data types
-_DUCKDB_TYPE_MAP: dict[str, dt.DataType] = {
-    "BOOLEAN": dt.Boolean(),
-    "TINYINT": dt.Int8(),
-    "SMALLINT": dt.Int16(),
-    "INTEGER": dt.Int32(),
-    "BIGINT": dt.Int64(),
-    "FLOAT": dt.Float32(),
-    "DOUBLE": dt.Float64(),
-    "VARCHAR": dt.String(),
-    "TIMESTAMP": dt.Timestamp(timezone=None),
-    "TIMESTAMP WITH TIME ZONE": dt.Timestamp(timezone="UTC"),
-    "TIMESTAMPTZ": dt.Timestamp(timezone="UTC"),
-    "TIMESTAMP_NS": dt.Timestamp(timezone=None),
-    "DATE": dt.Date(),
 }
 
 # Reverse mapping from Ibis types to DuckDB type strings
@@ -60,15 +42,6 @@ def get_ibis_type_from_string(type_name: str) -> dt.DataType:
     return _COLUMN_TYPES[type_name]
 
 
-def get_ibis_type_from_duckdb(duckdb_type: str) -> dt.DataType:
-    """Convert a DuckDB type string to an Ibis DataType."""
-    upper = duckdb_type.upper()
-    if upper in _DUCKDB_TYPE_MAP:
-        return _DUCKDB_TYPE_MAP[upper]
-    msg = f"Unsupported DuckDB type: {duckdb_type}"
-    raise ValueError(msg)
-
-
 def get_duckdb_type_from_ibis(ibis_type: dt.DataType) -> str:
     """Convert an Ibis DataType to a DuckDB type string."""
     if isinstance(ibis_type, dt.Timestamp):
@@ -80,13 +53,3 @@ def get_duckdb_type_from_ibis(ibis_type: dt.DataType) -> str:
             return duckdb_name
     msg = f"Unsupported Ibis type for DuckDB: {ibis_type}"
     raise ValueError(msg)
-
-
-def pyarrow_to_ibis_type(arrow_type: pa.DataType) -> dt.DataType:
-    """Convert a PyArrow type to an Ibis DataType."""
-    return dt.DataType.from_pyarrow(arrow_type)
-
-
-def ibis_to_pyarrow_type(ibis_type: dt.DataType) -> pa.DataType:
-    """Convert an Ibis DataType to a PyArrow type."""
-    return ibis_type.to_pyarrow()

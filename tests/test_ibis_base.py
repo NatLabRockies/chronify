@@ -188,3 +188,12 @@ def test_transaction_nesting_outer_rollback_includes_inner(iter_backends):
     assert not backend.has_table("nest_outer_r")
     assert not backend.has_table("nest_inner_r")
     assert not backend._in_transaction
+
+
+def test_execute_joins_memtable(iter_backends):
+    backend = iter_backends
+    backend.create_table("t", pd.DataFrame({"id": [1, 2], "value": [1.0, 2.0]}))
+    lookup = ibis.memtable(pd.DataFrame({"id": [2], "label": ["b"]}))
+    table = backend.table("t")
+    df = backend.execute(table.join(lookup, "id"))
+    assert df[["id", "value", "label"]].values.tolist() == [[2, 2.0, "b"]]

@@ -20,6 +20,8 @@ from chronify.ibis.base import (
     ObjectType,
     _DATETIME_RANGES,
     _normalize_timestamps,
+    _quote_identifier,
+    _validate_insert_columns,
 )
 from chronify.time import TimeDataType
 from chronify.time_configs import TimeBaseModel
@@ -386,22 +388,3 @@ def _infer_sqlite_path(connection: ibis.BaseBackend) -> str | None:
     # PRAGMA database_list returns (seq, name, file); empty string => in-memory.
     path = row[2]
     return None if not path else str(path)
-
-
-def _validate_insert_columns(
-    table_name: str, target_columns: list[str], data_columns: list[str]
-) -> None:
-    missing = [c for c in target_columns if c not in data_columns]
-    extra = [c for c in data_columns if c not in target_columns]
-    if missing or extra:
-        msg = (
-            f"Insert data columns do not match table {table_name!r}. "
-            f"Missing: {missing}. Extra: {extra}."
-        )
-        raise InvalidParameter(msg)
-
-
-def _quote_identifier(identifier: str) -> str:
-    """Quote a SQL identifier for SQLite, escaping embedded double quotes."""
-    escaped = identifier.replace('"', '""')
-    return f'"{escaped}"'

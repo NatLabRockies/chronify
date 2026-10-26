@@ -179,6 +179,12 @@ def _validate_insert_columns(
         raise InvalidParameter(msg)
 
 
+def _quote_identifier(identifier: str) -> str:
+    """Quote a SQL identifier with double quotes, escaping embedded double quotes."""
+    escaped = identifier.replace('"', '""')
+    return f'"{escaped}"'
+
+
 class ObjectType(StrEnum):
     TABLE = "table"
     VIEW = "view"

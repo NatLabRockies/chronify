@@ -266,7 +266,8 @@ class SparkBackend(IbisBackend):
         return Path(location)
 
     def _remove_managed_table_location(self, name: str) -> None:
-        path = self._warehouse_path() / name
+        # Spark lowercases table names for managed-table directories.
+        path = self._warehouse_path() / name.lower()
         if path.exists():
             shutil.rmtree(path)
 

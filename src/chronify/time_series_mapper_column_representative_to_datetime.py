@@ -175,9 +175,7 @@ class MapperColumnRepresentativeToDatetime(TimeSeriesMapperBase):
                     logger.exception("Failed to drop intermediate table {} during cleanup.", tbl)
             raise
 
-        if not isinstance(self._from_time_config, YearMonthDayPeriodTimeNTZ):
-            msg = "Intermediate mapping only valid for YearMonthDayPeriodNTZ time config"
-            raise InvalidParameter(msg)
+        assert isinstance(self._from_time_config, YearMonthDayPeriodTimeNTZ)  # for mypy
         return self._create_intermediate_ymdh_schema(
             intermediate_ymdh_table_name, self._from_schema, self._from_time_config
         )

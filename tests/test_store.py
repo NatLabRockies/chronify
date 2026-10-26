@@ -674,6 +674,24 @@ def test_backup(iter_backends_file, one_week_per_month_by_hour_table, tmp_path):
     assert df3.equals(df)
 
 
+def test_backup_keeps_existing_expressions(tmp_path, one_week_per_month_by_hour_table):
+    df, _, schema = one_week_per_month_by_hour_table
+    store = Store(backend=make_backend("duckdb", database=str(tmp_path / "store.db")))
+    store.ingest_table(df, schema)
+    table = store.get_table(schema.name)
+    store.backup(tmp_path / "backup.db")
+    assert table.count().execute() == len(df)
+
+
+def test_backup_in_transaction_not_allowed(tmp_path, one_week_per_month_by_hour_table):
+    backend = make_backend("duckdb", database=str(tmp_path / "store.db"))
+    store = Store(backend=backend)
+    with backend.transaction():
+        with pytest.raises(InvalidOperation):
+            store.backup(tmp_path / "backup.db")
+    assert not (tmp_path / "backup.db").exists()
+
+
 def test_backup_not_allowed(one_week_per_month_by_hour_table, tmp_path):
     backend = make_backend("duckdb")
     df, _, schema = one_week_per_month_by_hour_table

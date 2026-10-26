@@ -571,3 +571,13 @@ def test_spark_non_utc_session_tz_naive_ingest_error_explains_cause(spark_store:
     schema = _three_hours_schema("tz_naive_ingest", None)
     with pytest.raises(InvalidTable, match="Spark session time zone is 'America/Denver'"):
         spark_store.ingest_table(_three_hours_frame(None), schema)
+
+
+def test_spark_create_table_removes_stale_mixed_case_location(
+    spark_store: Store, tmp_path: Path
+) -> None:
+    stale = tmp_path / "spark-warehouse" / "mytable"
+    stale.mkdir(parents=True)
+    (stale / "part-0.parquet").write_bytes(b"")
+    spark_store.backend.create_table("MyTable", pd.DataFrame({"x": [1]}))
+    assert spark_store.backend.execute(spark_store.backend.table("MyTable"))["x"].tolist() == [1]
