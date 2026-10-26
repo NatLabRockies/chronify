@@ -283,8 +283,9 @@ class SQLiteBackend(IbisBackend):
             real.execute("COMMIT")
 
     def _rollback_transaction(self) -> None:
-        assert self._real_con is not None
-        real = self._real_con
+        # _real_con is already None when called after a failed COMMIT, because
+        # _commit_transaction restores the real connection up front.
+        real = self._real_con if self._real_con is not None else self._connection.con
         self._connection.con = real
         self._real_con = None
         self._in_transaction = False

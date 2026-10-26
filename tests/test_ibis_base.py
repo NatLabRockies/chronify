@@ -1,5 +1,7 @@
 """Tests for the IbisBackend base class (transaction, execute_sql, etc.)."""
 
+import sqlite3
+
 import ibis
 import pandas as pd
 import pytest
@@ -263,3 +265,26 @@ def test_sqlite_adapt_column_matches_adapt_value() -> None:
         actual = _adapt_column(df[col])
         assert actual == expected, col
         assert [type(v) for v in actual] == [type(v) for v in expected], col
+
+
+def test_sqlite_failed_commit_rolls_back(tmp_path):
+    db = str(tmp_path / "store.db")
+    backend = make_backend("sqlite", database=db)
+    backend.execute_sql("CREATE TABLE t (a INTEGER)")
+    backend.execute_sql("CREATE TABLE u (a INTEGER)")
+    backend.connection.con.execute("PRAGMA busy_timeout = 0")
+    # An open read transaction holds a SHARED lock, which makes COMMIT fail.
+    reader = sqlite3.connect(db, isolation_level=None)
+    reader.execute("BEGIN")
+    reader.execute("SELECT * FROM t").fetchall()
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        with backend.transaction():
+            backend.execute_sql("INSERT INTO t VALUES (1)")
+    reader.execute("ROLLBACK")
+    reader.close()
+
+    # A later autocommitting write must not commit the failed block's insert.
+    backend.execute_sql("INSERT INTO u VALUES (2)")
+    with sqlite3.connect(db) as check:
+        assert check.execute("SELECT * FROM t").fetchall() == []
+    backend.dispose()

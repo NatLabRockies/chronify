@@ -3,7 +3,7 @@
 import re
 from abc import ABC, abstractmethod
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from enum import StrEnum
 from functools import singledispatch, singledispatchmethod
 from typing import Any, Generator, Iterable, cast
@@ -488,5 +488,11 @@ class IbisBackend(ABC):
         else:
             try:
                 self._commit_transaction()
+            except Exception:
+                # A failed COMMIT can leave the transaction open; the next
+                # autocommitting statement would then commit the partial writes.
+                with suppress(Exception):
+                    self._rollback_transaction()
+                raise
             finally:
                 self._in_transaction = False
