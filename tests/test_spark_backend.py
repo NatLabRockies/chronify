@@ -562,3 +562,12 @@ def test_spark_non_utc_session_keeps_tz_naive_wall_clock(
     spark_store.localize_time_zone(schema.name, ZoneInfo("EST"), output_file=out)
     expected = (df["timestamp"] + pd.Timedelta(hours=5)).dt.tz_localize("UTC")
     assert pd.read_parquet(out)["timestamp"].tolist() == expected.tolist()
+
+
+@pytest.mark.parametrize("spark_store", ["America/Denver"], indirect=True)
+def test_spark_non_utc_session_tz_naive_ingest_error_explains_cause(spark_store: Store) -> None:
+    from chronify.exceptions import InvalidTable
+
+    schema = _three_hours_schema("tz_naive_ingest", None)
+    with pytest.raises(InvalidTable, match="Spark session time zone is 'America/Denver'"):
+        spark_store.ingest_table(_three_hours_frame(None), schema)

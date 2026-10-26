@@ -10,7 +10,7 @@ from chronify.models import TableSchema
 from chronify.time_configs import DatetimeRangeWithTZColumn
 from chronify.time_range_generator_factory import make_time_range_generator
 from chronify.datetime_range_generator import DatetimeRangeGeneratorExternalTimeZone
-from chronify.time import LeapDayAdjustmentType
+from chronify.time import LeapDayAdjustmentType, TimeDataType
 from chronify.time_utils import is_prevailing_time_zone
 
 
@@ -21,9 +21,34 @@ def check_timestamps(
     leap_day_adjustment: Optional[LeapDayAdjustmentType] = None,
 ) -> None:
     """Performs checks on time series arrays in a table."""
-    TimeSeriesChecker(
-        backend, table_name, schema, leap_day_adjustment=leap_day_adjustment
-    ).check_timestamps()
+    try:
+        TimeSeriesChecker(
+            backend, table_name, schema, leap_day_adjustment=leap_day_adjustment
+        ).check_timestamps()
+    except InvalidTable as exc:
+        hint = _spark_tz_naive_hint(backend, schema)
+        if hint is None:
+            raise
+        msg = f"{exc} {hint}"
+        raise InvalidTable(msg) from exc
+
+
+def _spark_tz_naive_hint(backend: IbisBackend, schema: TableSchema) -> Optional[str]:
+    """Explain the likely cause when tz-naive timestamps fail under a non-UTC Spark session."""
+    if backend.name != "spark":
+        return None
+    if getattr(schema.time_config, "dtype", None) != TimeDataType.TIMESTAMP_NTZ:
+        return None
+    session_tz = cast(Any, backend).session_time_zone
+    if session_tz == "UTC":
+        return None
+    return (
+        f"Note: the Spark session time zone is {session_tz!r}. Spark converts tz-naive "
+        "timestamps through the session time zone when it writes and reads them, which "
+        "shifts them, and a time zone with daylight saving time drops or merges the hours "
+        "around each transition. Use a Spark session with "
+        "spark.sql.session.timeZone=UTC."
+    )
 
 
 class TimeSeriesChecker:

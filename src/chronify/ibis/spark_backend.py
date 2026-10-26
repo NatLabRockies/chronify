@@ -2,7 +2,7 @@
 
 import shutil
 from contextlib import contextmanager
-from typing import Any, Generator
+from typing import Any, Generator, cast
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 
@@ -163,6 +163,11 @@ class SparkBackend(IbisBackend):
     @property
     def database(self) -> str | None:
         return None
+
+    @property
+    def session_time_zone(self) -> str | None:
+        """Return the Spark session time zone (spark.sql.session.timeZone)."""
+        return cast(str | None, self._session.conf.get(_SESSION_TZ_KEY, None))
 
     @property
     def connection(self) -> ibis.BaseBackend:
