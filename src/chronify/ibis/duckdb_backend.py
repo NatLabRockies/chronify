@@ -64,13 +64,10 @@ class DuckDBBackend(IbisBackend):
         return self._connection
 
     def execute(self, expr: ir.Expr) -> pd.DataFrame:
-        # Bypass Ibis's generic pandas materialization and use DuckDB's native
-        # cursor.fetch_df(), which is zero-copy from Arrow.
+        # Bypass Ibis's generic per-column pandas materialization; Arrow's
+        # to_pandas() is much faster.
         if isinstance(expr, ibis.Table):
-            # Registers memtables and UDFs, as ibis's own execute does.
-            self._connection._run_pre_execute_hooks(expr)
-            sql = self._connection.compile(expr)
-            return cast(pd.DataFrame, self._connection.con.execute(sql).fetch_df())
+            return self._connection.to_pyarrow(expr).to_pandas()
         return cast(pd.DataFrame, self._connection.execute(expr))
 
     def execute_sql_to_df(self, query: str, params: Any = None) -> pd.DataFrame:
@@ -103,14 +100,10 @@ class DuckDBBackend(IbisBackend):
         if not partition_by:
             self._connection.to_parquet(expr, path)
             return
-        # ibis-duckdb renders partition_by as a Python list repr, which DuckDB
-        # rejects, so issue the COPY directly.
-        self._connection._run_pre_execute_hooks(expr)
-        sql = self._connection.compile(expr)
-        cols = ", ".join(_quote_identifier(c) for c in partition_by)
-        self._connection.con.execute(
-            f"COPY ({sql}) TO {_quote_literal(path)} (FORMAT PARQUET, PARTITION_BY ({cols}))"
-        )
+        # ibis-duckdb renders partition_by with repr(). DuckDB rejects a list and a
+        # one-element tuple's trailing comma, so pass a str for one column.
+        cols = partition_by[0] if len(partition_by) == 1 else tuple(partition_by)
+        self._connection.to_parquet(expr, path, partition_by=cols)
 
     def backup(self, dst: str) -> None:
         if self._database is None:

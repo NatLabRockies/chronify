@@ -1661,6 +1661,17 @@ def test_duckdb_write_partitioned_parquet(tmp_path):
     assert sorted(p.name for p in out.iterdir()) == ["device=d1", "device=d2"]
 
 
+def test_duckdb_write_parquet_from_memtable_multiple_partitions(tmp_path):
+    import ibis
+
+    backend = make_backend("duckdb")
+    expr = ibis.memtable(pd.DataFrame({"a": [1, 2], "b": ["x", "y"], "c": [3, 4]}))
+    out = tmp_path / "out"
+    backend.write_parquet(expr, str(out), partition_by=["b", "c"])
+    assert sorted(p.name for p in out.iterdir()) == ["b=x", "b=y"]
+    assert sorted(p.name for p in (out / "b=x").iterdir()) == ["c=3"]
+
+
 def test_sqlite_create_table_from_memtable():
     import ibis
 
