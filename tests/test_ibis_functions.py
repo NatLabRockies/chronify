@@ -132,3 +132,17 @@ class TestWriteTable:
         with pytest.raises(InvalidOperation, match="Invalid if_exists"):
             backend.write_table(df, "test_tbl", [config], if_exists="invalid")
         backend.dispose()
+
+
+def test_duckdb_parquet_view_survives_reopen(tmp_path):
+    path = tmp_path / "data.parquet"
+    pd.DataFrame({"a": [1, 2]}).to_parquet(path)
+    db = str(tmp_path / "store.db")
+    backend = make_backend("duckdb", database=db)
+    backend.create_view_from_parquet(str(path), "v")
+    backend.dispose()
+
+    backend = make_backend("duckdb", database=db)
+    assert backend.list_tables() == ["v"]
+    assert backend.execute(backend.table("v"))["a"].tolist() == [1, 2]
+    backend.dispose()

@@ -80,12 +80,18 @@ class DuckDBBackend(IbisBackend):
         return cast(pd.DataFrame, cursor.fetch_df())
 
     def create_view_from_parquet(self, path: str, name: str) -> tuple[ibis.Table, ObjectType]:
-        parquet_path = Path(path)
+        # Absolute path because the view is persisted and may be read from a different cwd.
+        parquet_path = Path(path).resolve()
         if parquet_path.is_dir():
             read_path = str(parquet_path / "**" / "*.parquet").replace("\\", "/")
         else:
             read_path = str(parquet_path).replace("\\", "/")
-        self._connection.create_view(name, self._connection.read_parquet(read_path))
+        # Reference the file directly. ibis's read_parquet registers a session-only
+        # temp view, which would make this view unusable after the connection closes.
+        self._connection.con.execute(
+            f"CREATE VIEW {_quote_identifier(name)} AS "
+            f"SELECT * FROM read_parquet({_quote_literal(read_path)})"
+        )
         return self.table(name), ObjectType.VIEW
 
     def write_parquet(
