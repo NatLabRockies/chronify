@@ -20,6 +20,7 @@ from chronify.time_configs import (
 from chronify.time_range_generator_factory import make_time_range_generator
 from chronify.time_series_mapper_datetime import MapperDatetimeToDatetime
 from chronify.time import TimeDataType, TimeType, DaylightSavingAdjustmentType, AggregationType
+from chronify.utils.sql import make_temp_view_name
 
 logger = logging.getLogger(__name__)
 
@@ -118,16 +119,19 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
             check_mapped_timestamps=False,
         )
 
-        MapperDatetimeToDatetime(
-            self._backend,
-            mapped_schema,
-            self._to_schema,
-            self._data_adjustment,
-            self._wrap_time_allowed,
-        ).map_time(
-            output_file=output_file,
-            check_mapped_timestamps=check_mapped_timestamps,
-        )
+        try:
+            MapperDatetimeToDatetime(
+                self._backend,
+                mapped_schema,
+                self._to_schema,
+                self._data_adjustment,
+                self._wrap_time_allowed,
+            ).map_time(
+                output_file=output_file,
+                check_mapped_timestamps=check_mapped_timestamps,
+            )
+        finally:
+            self._backend.drop_table(mapped_schema.name)
 
     def _create_intermediate_schema(self) -> TableSchema:
         """Create the intermediate table schema for converting index time to its represented datetime"""
@@ -140,7 +144,7 @@ class MapperIndexTimeToDatetime(TimeSeriesMapperBase):
         time_kwargs["time_column"] = "represented_time"
 
         schema_kwargs = self._from_schema.model_dump()
-        schema_kwargs["name"] += "_intermediate"
+        schema_kwargs["name"] = make_temp_view_name(f"{schema_kwargs['name']}_intermediate")
 
         schema_kwargs["time_config"] = DatetimeRange(**time_kwargs)
         schema = TableSchema(**schema_kwargs)

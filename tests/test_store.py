@@ -685,6 +685,24 @@ def test_backup(iter_backends_file, one_week_per_month_by_hour_table, tmp_path):
     assert df3.equals(df)
 
 
+def test_backup_keeps_existing_expressions(tmp_path, one_week_per_month_by_hour_table):
+    df, _, schema = one_week_per_month_by_hour_table
+    store = Store(backend=make_backend("duckdb", database=str(tmp_path / "store.db")))
+    store.ingest_table(df, schema)
+    table = store.get_table(schema.name)
+    store.backup(tmp_path / "backup.db")
+    assert table.count().execute() == len(df)
+
+
+def test_backup_in_transaction_not_allowed(tmp_path, one_week_per_month_by_hour_table):
+    backend = make_backend("duckdb", database=str(tmp_path / "store.db"))
+    store = Store(backend=backend)
+    with backend.transaction():
+        with pytest.raises(InvalidOperation):
+            store.backup(tmp_path / "backup.db")
+    assert not (tmp_path / "backup.db").exists()
+
+
 def test_backup_not_allowed(one_week_per_month_by_hour_table, tmp_path):
     backend = make_backend("duckdb")
     df, _, schema = one_week_per_month_by_hour_table
@@ -717,6 +735,18 @@ def test_delete_rows(iter_stores_by_engine: Store, one_week_per_month_by_hour_ta
         store.read_table(schema.name).execute()
     with pytest.raises(TableNotStored):
         store.delete_rows(schema.name, {"id": 3})
+
+
+def test_delete_rows_keeps_null_ids(iter_stores_by_engine: Store):
+    store = iter_stores_by_engine
+    schema = _hourly_schema("t", ZoneInfo("UTC"), length=2)
+    df = pd.concat([_hourly_frame(schema, i) for i in (1, 2, 3)], ignore_index=True)
+    df["id"] = df["id"].astype("Int64").replace(3, pd.NA)
+    store.ingest_table(df, schema)
+    assert store.delete_rows(schema.name, {"id": np.int64(1)}) == 2
+    ids = store.read_table(schema.name).execute()["id"]
+    assert sorted(ids.dropna().tolist()) == [2, 2]
+    assert ids.isna().sum() == 2
 
 
 def test_drop_table(iter_stores_by_engine: Store, one_week_per_month_by_hour_table):
@@ -1350,3 +1380,215 @@ def test_map_table_cleanup_handles_directory_staging(tmp_path, monkeypatch):
     assert not output_file.exists()
     leftover = sorted(p.name for p in tmp_path.iterdir())
     assert leftover == []
+
+
+def test_migrate_legacy_sqlite_timestamps(tmp_path):
+    """A SQLite file written by chronify <= 0.7 (SQLAlchemy) is upgraded on load."""
+    import sqlite3
+
+    def schema(name: str, tz: tzinfo | None) -> TableSchema:
+        return TableSchema(
+            name=name,
+            time_config=DatetimeRange(
+                time_column="timestamp",
+                start=datetime(2020, 1, 1, tzinfo=tz),
+                length=3,
+                resolution=timedelta(hours=1),
+            ),
+            time_array_id_columns=["id"],
+            value_column="value",
+        )
+
+    tz_schema = schema("tz", ZoneInfo("Etc/GMT+5"))
+    mapped_schema = schema("tz_mapped", ZoneInfo("Etc/GMT+5"))
+    ntz_schema = schema("ntz", None)
+    # Mimic SQLAlchemy's layout: DATETIME for created tables, NUM for CREATE TABLE AS
+    # SELECT, UTC wall clock with microseconds for tz-aware values.
+    path = tmp_path / "legacy.db"
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE schemas (name VARCHAR NOT NULL, schema VARCHAR, UNIQUE (name));
+        CREATE TABLE tz (timestamp DATETIME, id BIGINT, value DOUBLE);
+        CREATE TABLE ntz (timestamp DATETIME, id BIGINT, value DOUBLE);
+        INSERT INTO tz VALUES
+            ('2020-01-01 05:00:00.000000', 1, 1.0),
+            ('2020-01-01 06:00:00.000000', 1, 2.0),
+            ('2020-01-01 07:00:00.000000', 1, 3.0);
+        INSERT INTO ntz VALUES
+            ('2020-01-01 00:00:00.000000', 1, 1.0),
+            ('2020-01-01 01:00:00.000000', 1, 2.0),
+            ('2020-01-01 02:00:00.000000', 1, 3.0);
+        CREATE TABLE tz_mapped AS SELECT id, timestamp, value FROM tz;
+        CREATE VIEW tz_view AS SELECT tz.timestamp, tz.id, tz.value FROM tz;
+        """
+    )
+    con.executemany(
+        "INSERT INTO schemas VALUES (?, ?)",
+        [(s.name, s.model_dump_json()) for s in (tz_schema, mapped_schema, ntz_schema)],
+    )
+    con.commit()
+    con.close()
+
+    store = Store.load_from_file(path, backend_name="sqlite")
+    expected_tz = pd.date_range("2020-01-01 05:00", periods=3, freq="h", tz="UTC")
+    for name in ("tz", "tz_mapped"):
+        df = store.read_table(name).execute().sort_values("timestamp")
+        assert (df["timestamp"].dt.tz_convert("UTC").to_numpy() == expected_tz.to_numpy()).all()
+        store.check_timestamps(name)
+    df = store.read_table("ntz").execute().sort_values("timestamp")
+    assert df["timestamp"].dt.tz is None
+    assert (df["timestamp"] == pd.date_range("2020-01-01", periods=3, freq="h")).all()
+    assert len(store.read_query("SELECT * FROM tz_view").execute()) == 3
+
+    # New writes must use the same encoding so joins and appends line up.
+    store.ingest_table(
+        pd.DataFrame({"timestamp": expected_tz, "id": 2, "value": [4.0, 5.0, 6.0]}), tz_schema
+    )
+    store.check_timestamps("tz")
+    store.map_table_time_config("tz", schema("tz_out", ZoneInfo("US/Eastern")))
+    assert len(store.read_table("tz_out").execute()) == 6
+    store.dispose()
+
+    # Second load is a no-op.
+    store = Store.load_from_file(path, backend_name="sqlite")
+    assert store.backend.migrate_legacy_timestamps({}) == []
+    store.dispose()
+
+
+@pytest.mark.parametrize("tz", [None, ZoneInfo("Etc/GMT+5")])
+def test_ingest_null_timestamps_on_create(iter_stores_by_engine: Store, tz):
+    """NULL timestamps in the first ingest (CREATE TABLE path) must be stored as NULL."""
+    store = iter_stores_by_engine
+    schema = TableSchema(
+        name="nulls",
+        time_config=DatetimeRange(
+            time_column="timestamp",
+            start=datetime(2020, 1, 1, tzinfo=tz),
+            length=3,
+            resolution=timedelta(hours=1),
+        ),
+        time_array_id_columns=["id"],
+        value_column="value",
+    )
+    timestamps = pd.Series(pd.date_range("2020-01-01", periods=3, freq="h", tz=tz))
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.concat([timestamps, pd.Series([pd.NaT])], ignore_index=True),
+            "id": [1, 1, 1, 2],
+            "value": [1.0, 2.0, 3.0, np.nan],
+        }
+    )
+    assert store.ingest_table(df, schema)
+    result = store.read_table("nulls").execute()
+    assert len(result) == 4
+    assert result["timestamp"].isna().sum() == 1
+    assert result["value"].isna().sum() == 1
+    store.check_timestamps("nulls")
+
+
+def _hourly_schema(name: str, tz: tzinfo | None, length: int = 24) -> TableSchema:
+    return TableSchema(
+        name=name,
+        time_config=DatetimeRange(
+            time_column="timestamp",
+            start=datetime(2020, 1, 1, tzinfo=tz),
+            length=length,
+            resolution=timedelta(hours=1),
+        ),
+        time_array_id_columns=["id"],
+        value_column="value",
+    )
+
+
+def _hourly_frame(schema: TableSchema, id_: int) -> pd.DataFrame:
+    config = schema.time_config
+    return pd.DataFrame(
+        {
+            "timestamp": pd.date_range(config.start, periods=config.length, freq="h"),
+            "id": id_,
+            "value": np.arange(float(config.length)),
+        }
+    )
+
+
+def test_map_time_fails_if_destination_exists(iter_stores_by_engine: Store, tmp_path):
+    from chronify.time_series_mapper import map_time
+
+    store = iter_stores_by_engine
+    src = _hourly_schema("src", ZoneInfo("Etc/GMT+5"))
+    dst = _hourly_schema("dst", ZoneInfo("US/Eastern"))
+    store.ingest_table(_hourly_frame(src, 1), src)
+    store.ingest_table(_hourly_frame(dst, 99), dst)
+
+    with pytest.raises(TableAlreadyExists):
+        map_time(store.backend, src, dst)
+    assert store.read_table("dst").execute()["id"].unique().tolist() == [99]
+
+    # Writing to Parquet never touches the database table of the same name.
+    for check in (False, True):
+        out = tmp_path / f"{check}.parquet"
+        map_time(store.backend, src, dst, output_file=out, check_mapped_timestamps=check)
+        assert pd.read_parquet(out)["id"].unique().tolist() == [1]
+        assert store.read_table("dst").execute()["id"].unique().tolist() == [99]
+
+
+def test_create_view_from_parquet_failed_check_removes_schema(
+    iter_stores_by_engine: Store, tmp_path
+):
+    store = iter_stores_by_engine
+    schema = _hourly_schema("pq", ZoneInfo("UTC"))
+    df = _hourly_frame(schema, 1)
+    bad = tmp_path / "bad.parquet"
+    df.iloc[:-1].to_parquet(bad)
+    with pytest.raises(InvalidTable):
+        store.create_view_from_parquet(bad, schema)
+    assert not store.has_table(schema.name)
+    with pytest.raises(TableNotStored):
+        store.schema_manager.get_schema(schema.name)
+
+    good = tmp_path / "good.parquet"
+    df.to_parquet(good)
+    store.create_view_from_parquet(good, schema)
+    assert len(store.read_table(schema.name).execute()) == len(df)
+
+
+def test_map_time_keeps_table_named_like_mapping_table(iter_stores_by_engine: Store):
+    from chronify.time_series_mapper import map_time
+
+    store = iter_stores_by_engine
+    src = _hourly_schema("src", ZoneInfo("Etc/GMT+5"))
+    dst = _hourly_schema("dst", ZoneInfo("US/Eastern"))
+    store.ingest_table(_hourly_frame(src, 1), src)
+    store.backend.create_table("mapping_table", pd.DataFrame({"x": [1]}))
+
+    map_time(store.backend, src, dst)
+    assert store.backend.has_table("dst")
+    assert store.backend.execute(store.backend.table("mapping_table"))["x"].tolist() == [1]
+
+
+def test_map_index_time_twice_drops_intermediate(iter_stores_by_engine: Store):
+    from chronify.time_configs import IndexTimeRange
+
+    store = iter_stores_by_engine
+    src = TableSchema(
+        name="index_src",
+        time_config=IndexTimeRange(
+            time_column="index_time",
+            start=1,
+            length=24,
+            start_timestamp=pd.Timestamp("2020-01-01 00:00"),
+            resolution=timedelta(hours=1),
+            interval_type=TimeIntervalType.PERIOD_BEGINNING,
+        ),
+        time_array_id_columns=["id"],
+        value_column="value",
+    )
+    df = pd.DataFrame({"index_time": range(1, 25), "id": 1, "value": np.arange(24.0)})
+    store.ingest_table(df, src)
+    for name in ("out1", "out2"):
+        store.map_table_time_config(
+            src.name, _hourly_schema(name, ZoneInfo("Etc/GMT+5")), check_mapped_timestamps=True
+        )
+        assert len(store.read_table(name).execute()) == 24
+    assert not any("_intermediate" in t for t in store.backend.list_tables())

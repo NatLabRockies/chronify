@@ -7,10 +7,7 @@ from typing_extensions import Annotated
 
 from chronify.base_models import ChronifyBaseModel
 from chronify.exceptions import InvalidValue
-from chronify.ibis.types import (
-    get_ibis_type_from_string,
-    get_duckdb_type_from_ibis,
-)
+from chronify.ibis.types import get_ibis_type_from_string
 from chronify.time_configs import TimeConfig
 
 
@@ -141,11 +138,6 @@ class MappingTableSchema(ChronifyBaseModel):
         for config in self.time_configs:
             time_columns += config.list_time_columns()
         return time_columns
-
-
-def get_duckdb_type_from_ibis_type(ibis_type: dt.DataType) -> str:
-    """Return the duckdb type string for an ibis type."""
-    return get_duckdb_type_from_ibis(ibis_type)
 
 
 class ColumnDType(ChronifyBaseModel):

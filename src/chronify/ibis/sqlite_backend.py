@@ -2,13 +2,13 @@
 
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from functools import singledispatchmethod
 from typing import Any, Iterable
 
 import ibis
-import ibis.expr.datatypes as dt
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 from loguru import logger
@@ -20,6 +20,8 @@ from chronify.ibis.base import (
     ObjectType,
     _DATETIME_RANGES,
     _normalize_timestamps,
+    _quote_identifier,
+    _validate_insert_columns,
 )
 from chronify.time import TimeDataType
 from chronify.time_configs import TimeBaseModel
@@ -28,25 +30,20 @@ from chronify.time_configs import TimeBaseModel
 def _adapt_value(v: Any) -> Any:
     """Convert a value for SQLite parameterized insertion.
 
-    Converts datetime/Timestamp objects to strings to avoid the Python 3.12+
-    DeprecationWarning about the default datetime adapter. Returns None for
-    pd.NaT and other missing-value sentinels.
-
-    SQLite stores timestamps as text, so every comparison (joins, DELETE
-    predicates) is a raw string comparison. All timestamps therefore use one
-    canonical storage format: tz-naive UTC, space-separated, with microseconds
-    (``2020-01-01 00:00:00.000000``). This matches the format written by the
-    pre-ibis SQLAlchemy implementation, so databases created by older chronify
-    versions remain readable and joinable.
+    Converts datetime/Timestamp objects to ISO-format strings to avoid the
+    Python 3.12+ DeprecationWarning about the default datetime adapter.
+    Returns None for pd.NaT and other missing-value sentinels, and converts
+    numpy scalars to Python scalars.
     """
-    if v is pd.NaT or v is None:
+    if v is None or (pd.api.types.is_scalar(v) and pd.isna(v)):
         return None
     if isinstance(v, datetime):
-        if v.tzinfo is not None:
-            v = v.astimezone(timezone.utc).replace(tzinfo=None)
-        return v.isoformat(sep=" ", timespec="microseconds")
+        return v.isoformat()
     if hasattr(v, "isoformat"):
         return v.isoformat()
+    # sqlite3 binds numpy integers (e.g., from nullable Int64 columns) as BLOBs.
+    if isinstance(v, (np.number, np.bool_)):
+        return v.item()
     return v
 
 
@@ -138,35 +135,47 @@ class SQLiteBackend(IbisBackend):
         overwrite: bool = False,
     ) -> ibis.Table:
         if isinstance(obj, ibis.Table):
-            # SQLite CREATE TABLE AS SELECT loses datetime type info.
-            # Execute the expression first, then create from the DataFrame.
-            obj = self._connection.execute(obj)
-        elif isinstance(obj, pa.Table):
+            # SQLite CREATE TABLE AS SELECT loses datetime type info, so create the
+            # table from the schema and fill it in the database.
+            with self.transaction():
+                table = self._connection.create_table(
+                    name, schema=schema or obj.schema(), overwrite=overwrite
+                )
+                self.insert(name, obj)
+            return table
+        if isinstance(obj, pa.Table):
             obj = obj.to_pandas()
-        if isinstance(obj, pd.DataFrame) and len(obj) > 0:
-            # Create the table empty and insert through our parameterized path
-            # so creation-time rows get the same canonical timestamp string
-            # format as appended rows (see _adapt_value). ibis's own
-            # create_table insertion would store T-separated isoformat.
-            inferred = ibis.memtable(obj).schema()
-            self._connection.create_table(name, schema=inferred, overwrite=overwrite)
+        if obj is None:
+            return self._connection.create_table(name, schema=schema, overwrite=overwrite)
+        # ibis binds DataFrame values directly and sqlite3 rejects NaT, so create
+        # the empty table from the inferred schema and fill it via insert(), which
+        # adapts missing values and timestamps.
+        with self.transaction():
+            table = self._connection.create_table(
+                name, schema=schema or ibis.memtable(obj).schema(), overwrite=overwrite
+            )
             self.insert(name, obj)
-            return self.table(name)
-        return self._connection.create_table(name, obj=obj, schema=schema, overwrite=overwrite)
+        return table
 
     def insert(self, name: str, data: pd.DataFrame | pa.Table | ibis.Table) -> None:
-        if isinstance(data, ibis.Table):
-            data = data.execute()
-        elif isinstance(data, pa.Table):
+        if isinstance(data, pa.Table):
             data = data.to_pandas()
-        # Use raw SQLite cursor for parameterized inserts
         con = self._connection.con  # raw sqlite3 connection
-        table = self._connection.table(name)
-        columns = list(table.columns)
+        columns = list(self._connection.table(name).columns)
         _validate_insert_columns(name, columns, list(data.columns))
-        placeholders = ", ".join(["?"] * len(columns))
         col_list = ", ".join(_quote_identifier(c) for c in columns)
         quoted_name = _quote_identifier(name)
+        if isinstance(data, ibis.Table):
+            # Stay in the database. Timestamps are copied as the ISO text they are
+            # stored as; an expression that computes timestamps with SQLite functions
+            # would produce a different text format.
+            select = self._connection.compile(data.select(columns))
+            con.execute(f"INSERT INTO {quoted_name} ({col_list}) {select}")
+            self._commit_if_needed()
+            logger.trace("Inserted query results into {}", name)
+            return
+        # Use raw SQLite cursor for parameterized inserts
+        placeholders = ", ".join(["?"] * len(columns))
         sql = f"INSERT INTO {quoted_name} ({col_list}) VALUES ({placeholders})"
 
         ordered = data.loc[:, columns]
@@ -181,8 +190,7 @@ class SQLiteBackend(IbisBackend):
         quoted_name = _quote_identifier(name)
         where = " AND ".join(f"{_quote_identifier(c)} = ?" for c in values)
         sql = f"DELETE FROM {quoted_name} WHERE {where}"
-        # Adapt values so datetime predicates use the canonical storage format
-        # and can match the stored strings.
+        # Adapt values so datetime predicates match the stored ISO strings.
         con.execute(sql, [_adapt_value(v) for v in values.values()])
         self._commit_if_needed()
         logger.trace("Deleted rows from {} matching {}", name, values)
@@ -200,25 +208,6 @@ class SQLiteBackend(IbisBackend):
     def execute_sql_to_df(self, query: str, params: Any = None) -> pd.DataFrame:
         logger.trace("execute_sql_to_df: {}", query)
         return pd.read_sql_query(query, self._connection.con, params=params)
-
-    def apply_schema_types(self, expr: ibis.Table, config: TimeBaseModel) -> ibis.Table:
-        """Re-attach the UTC annotation for TIMESTAMP_TZ columns.
-
-        Timestamps are stored as tz-naive UTC text (see :func:`_adapt_value`),
-        and databases created by pre-ibis chronify versions declare those
-        columns as plain DATETIME, so ibis reports them tz-naive. Cast to
-        ``Timestamp(timezone="UTC")`` so reads return tz-aware UTC values.
-        """
-        if not isinstance(config, _DATETIME_RANGES):
-            return expr
-        if config.dtype != TimeDataType.TIMESTAMP_TZ:
-            return expr
-        if config.time_column not in expr.columns:
-            return expr
-        col = expr[config.time_column]
-        if getattr(col.type(), "timezone", None) is not None:
-            return expr
-        return expr.mutate(**{config.time_column: col.cast(dt.Timestamp(timezone="UTC"))})
 
     def dispose(self) -> None:
         if self._owns_connection:
@@ -322,6 +311,87 @@ class SQLiteBackend(IbisBackend):
     def _supports_parquet_partitioning(self) -> bool:
         return False
 
+    def migrate_legacy_timestamps(self, time_columns: dict[str, dict[str, bool]]) -> list[str]:
+        """Rewrite timestamps stored by chronify <= 0.7 (SQLAlchemy) into the current format.
+
+        SQLAlchemy stored timestamps as ``YYYY-MM-DD HH:MM:SS.ffffff`` (UTC wall
+        clock for tz-aware data) in ``DATETIME`` columns, or ``NUM`` columns for
+        tables built with CREATE TABLE AS SELECT. Ibis writes ISO-8601 into
+        ``TIMESTAMP`` / ``TIMESTAMPTZ`` columns. SQLite compares timestamps as
+        text, so mixing the two silently breaks joins.
+
+        Parameters
+        ----------
+        time_columns
+            Registered time columns: ``{table: {column: is_tz_aware}}``.
+
+        Returns the names of the migrated tables.
+        """
+        con = self._connection.con
+        plans: dict[str, dict[str, bool]] = {}
+        for (table,) in con.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall():
+            declared = {
+                row[1]: row[2].upper()
+                for row in con.execute(f"PRAGMA table_info({_quote_identifier(table)})")
+            }
+            registered = time_columns.get(table, {})
+            legacy = {
+                col: registered.get(col, False)
+                for col, typ in declared.items()
+                if typ == "DATETIME"
+                or (col in registered and typ not in ("TIMESTAMP", "TIMESTAMPTZ"))
+            }
+            if legacy:
+                plans[table] = legacy
+
+        if not plans:
+            return []
+
+        con.execute("PRAGMA legacy_alter_table = ON")  # don't validate views during RENAME
+        try:
+            with self.transaction():
+                for table, legacy in plans.items():
+                    self._rebuild_with_iso_timestamps(table, legacy)
+        finally:
+            con.execute("PRAGMA legacy_alter_table = OFF")
+        return list(plans)
+
+    def _rebuild_with_iso_timestamps(self, table: str, legacy: dict[str, bool]) -> None:
+        con = self._connection.con
+        columns = [
+            (row[1], row[2])
+            for row in con.execute(f"PRAGMA table_info({_quote_identifier(table)})")
+        ]
+        defs = []
+        exprs = []
+        for col, typ in columns:
+            q = _quote_identifier(col)
+            if col not in legacy:
+                defs.append(f"{q} {typ}".rstrip())
+                exprs.append(q)
+                continue
+            is_tz = legacy[col]
+            defs.append(f"{q} {'TIMESTAMPTZ' if is_tz else 'TIMESTAMP'}")
+            # Matches Python's datetime.isoformat(), which is what _adapt_value and
+            # ibis write: microseconds only when nonzero, '+00:00' for UTC.
+            iso = (
+                f"substr({q}, 1, 10) || 'T' || substr({q}, 12, 8) || "
+                f"CASE WHEN substr({q}, 21, 6) IN ('', '000000') THEN '' "
+                f"ELSE '.' || substr({q}, 21, 6) END" + (" || '+00:00'" if is_tz else "")
+            )
+            exprs.append(
+                f"CASE WHEN {q} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] "
+                f"[0-9][0-9]:[0-9][0-9]:[0-9][0-9]*' THEN {iso} ELSE {q} END"
+            )
+        tmp = _quote_identifier(f"__chronify_migrate_{table}")
+        quoted = _quote_identifier(table)
+        con.execute(f"CREATE TABLE {tmp} ({', '.join(defs)})")
+        con.execute(f"INSERT INTO {tmp} SELECT {', '.join(exprs)} FROM {quoted}")
+        con.execute(f"DROP TABLE {quoted}")
+        con.execute(f"ALTER TABLE {tmp} RENAME TO {quoted}")
+
 
 def _infer_sqlite_path(connection: ibis.BaseBackend) -> str | None:
     """Return the database file path for an ibis SQLite connection, or None for in-memory."""
@@ -334,22 +404,3 @@ def _infer_sqlite_path(connection: ibis.BaseBackend) -> str | None:
     # PRAGMA database_list returns (seq, name, file); empty string => in-memory.
     path = row[2]
     return None if not path else str(path)
-
-
-def _validate_insert_columns(
-    table_name: str, target_columns: list[str], data_columns: list[str]
-) -> None:
-    missing = [c for c in target_columns if c not in data_columns]
-    extra = [c for c in data_columns if c not in target_columns]
-    if missing or extra:
-        msg = (
-            f"Insert data columns do not match table {table_name!r}. "
-            f"Missing: {missing}. Extra: {extra}."
-        )
-        raise InvalidParameter(msg)
-
-
-def _quote_identifier(identifier: str) -> str:
-    """Quote a SQL identifier for SQLite, escaping embedded double quotes."""
-    escaped = identifier.replace('"', '""')
-    return f'"{escaped}"'

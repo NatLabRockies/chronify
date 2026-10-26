@@ -4,6 +4,7 @@ from typing import Any, Optional, cast
 from datetime import tzinfo
 
 import ibis
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 from loguru import logger
@@ -16,14 +17,20 @@ from chronify.exceptions import (
     TableNotStored,
 )
 from chronify.csv_io import read_csv
-from chronify.ibis import IbisBackend, ObjectType, make_backend
+from chronify.ibis import IbisBackend, ObjectType, SQLiteBackend, make_backend
 from chronify.models import (
     CsvTableSchema,
     PivotedTableSchema,
     TableSchema,
 )
 from chronify.schema_manager import SchemaManager
-from chronify.time_configs import DatetimeRange, IndexTimeRangeBase, TimeBasedDataAdjustment
+from chronify.time import TimeDataType
+from chronify.time_configs import (
+    DatetimeRange,
+    DatetimeRangeWithTZColumn,
+    IndexTimeRangeBase,
+    TimeBasedDataAdjustment,
+)
 from chronify.time_series_checker import check_timestamps
 from chronify.time_series_mapper import map_time
 from chronify.time_zone_converter import TimeZoneConverter, TimeZoneConverterByColumn
@@ -64,6 +71,8 @@ class Store:
             self._backend = make_backend(name, database=database)
 
         self._schema_mgr = SchemaManager(self._backend)
+        if isinstance(self._backend, SQLiteBackend):
+            _migrate_legacy_sqlite_timestamps(self._backend, self._schema_mgr)
 
     @classmethod
     def create_in_memory_db(
@@ -1094,7 +1103,6 @@ class Store:
         file_path: Path | str,
         overwrite: bool = False,
         partition_columns: Optional[list[str]] = None,
-        name: Optional[str] = None,
     ) -> None:
         """Write the result of a query to a Parquet file.
 
@@ -1108,16 +1116,10 @@ class Store:
             Whether to overwrite an existing file.
         partition_columns
             Optional columns to partition by.
-        name
-            Optional table/view name used to look up the time config for
-            backend-specific timestamp normalization (e.g. Spark).
         """
         output_file = to_path(file_path)
         check_overwrite(output_file, overwrite)
         expr = self._backend.sql(stmt) if isinstance(stmt, str) else stmt
-        if name is not None:
-            schema = self._schema_mgr.get_schema(name)
-            expr = self._backend.apply_schema_types(expr, schema.time_config)
         self._backend.write_parquet(expr, str(output_file), partition_by=partition_columns)
 
     def write_table_to_parquet(
@@ -1173,6 +1175,11 @@ class Store:
             )
             raise InvalidParameter(msg)
 
+        # Backend drivers can't bind numpy scalars, e.g., values from df["id"].unique().
+        time_array_id_values = {
+            k: v.item() if isinstance(v, np.generic) else v
+            for k, v in time_array_id_values.items()
+        }
         # Build the predicate using ibis (safe -- no string interpolation).
         table = self._backend.table(name)
         predicates = [table[column] == value for column, value in time_array_id_values.items()]
@@ -1243,6 +1250,20 @@ def check_columns(
         cols = " ".join(sorted(diff))
         msg = f"These columns are defined in the schema but not present in the table: {cols}"
         raise InvalidTable(msg)
+
+
+def _migrate_legacy_sqlite_timestamps(backend: SQLiteBackend, schema_mgr: SchemaManager) -> None:
+    """Upgrade a SQLite database written by chronify <= 0.7 to the current timestamp format."""
+    time_columns: dict[str, dict[str, bool]] = {}
+    for schema in schema_mgr.list_schemas():
+        config = schema.time_config
+        if isinstance(config, (DatetimeRange, DatetimeRangeWithTZColumn)):
+            time_columns[schema.name] = {
+                config.time_column: config.dtype == TimeDataType.TIMESTAMP_TZ
+            }
+    migrated = backend.migrate_legacy_timestamps(time_columns)
+    if migrated:
+        logger.info("Migrated legacy SQLite timestamps in tables: {}", migrated)
 
 
 def _safe_cleanup_after_ingest_error(

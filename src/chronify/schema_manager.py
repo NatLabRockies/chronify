@@ -75,6 +75,10 @@ class SchemaManager:
         self._backend.delete_rows(self.SCHEMAS_TABLE, {"name": name})
         self._cache.pop(name, None)
 
+    def list_schemas(self) -> list[TableSchema]:
+        """Return all registered schemas."""
+        return list(self._cache.values())
+
     def rebuild_cache(self) -> None:
         """Rebuild the cache of schemas."""
         self._cache.clear()

@@ -1,17 +1,16 @@
 """DuckDB backend implementation for Ibis."""
 
-import shutil
 from pathlib import Path
 from typing import Any, cast
 
 import ibis
-import ibis.expr.operations as ops
 import ibis.expr.types as ir
 import pandas as pd
 from loguru import logger
 
 from chronify.exceptions import ConflictingInputsError, InvalidOperation, InvalidParameter
-from chronify.ibis.base import IbisBackend, ObjectType
+from chronify.ibis.base import IbisBackend, ObjectType, _quote_identifier
+from chronify.utils.sql import make_temp_view_name
 
 
 class DuckDBBackend(IbisBackend):
@@ -79,10 +78,10 @@ class DuckDBBackend(IbisBackend):
 
     def execute(self, expr: ir.Expr) -> pd.DataFrame:
         # Bypass Ibis's generic pandas materialization and use DuckDB's native
-        # cursor.fetch_df(), which is zero-copy from Arrow. Expressions that
-        # contain in-memory tables must go through ibis, which registers the
-        # memtables on the connection before executing.
-        if isinstance(expr, ibis.Table) and not expr.op().find(ops.InMemoryTable):
+        # cursor.fetch_df(), which is zero-copy from Arrow.
+        if isinstance(expr, ibis.Table):
+            # Registers memtables and UDFs, as ibis's own execute does.
+            self._connection._run_pre_execute_hooks(expr)
             sql = self._connection.compile(expr)
             return cast(pd.DataFrame, self._connection.con.execute(sql).fetch_df())
         return cast(pd.DataFrame, self._connection.execute(expr))
@@ -110,15 +109,18 @@ class DuckDBBackend(IbisBackend):
         if self._database is None:
             msg = "backup is only supported with a database backed by a file"
             raise InvalidOperation(msg)
-        if not self._owns_connection:
-            msg = "backup is not supported for externally-provided DuckDB connections"
+        if self._in_transaction:
+            msg = "backup is not supported inside a transaction"
             raise InvalidOperation(msg)
-        src = self._database
-        self._connection.disconnect()
+        # Copy through the open connection so expressions bound to it stay valid.
+        con = self._connection.con
+        src = con.execute("SELECT current_database()").fetchone()[0]
+        alias = _quote_identifier(make_temp_view_name("__chronify_backup"))
+        con.execute(f"ATTACH {_quote_literal(dst)} AS {alias}")
         try:
-            shutil.copyfile(src, dst)
+            con.execute(f"COPY FROM DATABASE {_quote_identifier(src)} TO {alias}")
         finally:
-            self._connection = ibis.duckdb.connect(src)
+            con.execute(f"DETACH {alias}")
 
     def _begin_transaction(self) -> None:
         self._connection.con.execute("BEGIN TRANSACTION")
@@ -133,10 +135,9 @@ class DuckDBBackend(IbisBackend):
         return True
 
 
-def _quote_identifier(identifier: str) -> str:
-    """Quote a SQL identifier for DuckDB, escaping embedded double quotes."""
-    escaped = identifier.replace('"', '""')
-    return f'"{escaped}"'
+def _quote_literal(value: str) -> str:
+    escaped = value.replace("'", "''")
+    return f"'{escaped}'"
 
 
 def _infer_duckdb_path(connection: ibis.BaseBackend) -> str | None:
