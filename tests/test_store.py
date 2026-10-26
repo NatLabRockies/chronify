@@ -23,6 +23,7 @@ from chronify.exceptions import (
 )
 from chronify.ibis import make_backend
 from chronify.models import ColumnDType, CsvTableSchema, PivotedTableSchema, TableSchema
+from chronify.schema_manager import SchemaManager
 from chronify.store import Store
 from chronify.time import TimeIntervalType, DaylightSavingAdjustmentType
 from chronify.time_configs import (
@@ -627,6 +628,31 @@ def test_load_existing_store(iter_backends_file, one_week_per_month_by_hour_tabl
     assert df3.equals(df2)
     with pytest.raises(FileNotFoundError):
         Store.load_from_file(backend_name=backend_name, file_path="./invalid/path")
+
+
+def test_load_store_with_legacy_schemas_table(
+    iter_backends_file, one_week_per_month_by_hour_table
+):
+    backend, backend_name = iter_backends_file
+    df, _, schema = one_week_per_month_by_hour_table
+    store = Store(backend=backend)
+    store.ingest_table(df, schema)
+    backend.rename_table(SchemaManager.SCHEMAS_TABLE, SchemaManager.LEGACY_SCHEMAS_TABLE)
+    file_path = Path(backend.database)
+
+    store2 = Store.load_from_file(backend_name=backend_name, file_path=file_path)
+    assert store2.list_tables() == [schema.name]
+    assert store2.read_table(schema.name).execute().equals(df)
+    assert not store2.backend.has_table(SchemaManager.LEGACY_SCHEMAS_TABLE)
+    store2.dispose()
+
+
+def test_user_table_named_schemas_is_not_migrated():
+    backend = make_backend("duckdb")
+    backend.create_table("schemas", obj=pd.DataFrame({"a": [1]}))
+    store = Store(backend=backend)
+    assert sorted(store.list_tables()) == ["schemas"]
+    assert backend.execute(backend.table("schemas"))["a"].tolist() == [1]
 
 
 def test_create_methods(iter_backend_names, tmp_path):

@@ -63,6 +63,11 @@ class DuckDBBackend(IbisBackend):
     def connection(self) -> ibis.BaseBackend:
         return self._connection
 
+    def table(self, name: str) -> ibis.Table:
+        # Qualify the name: DuckDB parses an unqualified DESCRIBE of a table named
+        # "schemas", "tables", or "databases" as a SHOW command, even when quoted.
+        return self._connection.table(name, database=self._connection.current_database)
+
     def execute(self, expr: ir.Expr) -> pd.DataFrame:
         # Bypass Ibis's generic per-column pandas materialization; Arrow's
         # to_pandas() is much faster.

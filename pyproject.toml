@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chronify"
-version = "0.7.0"
+version = "0.8.0"
 description = "Time series store and mapping libray"
 readme = "README.md"
-requires-python = ">=3.11, <3.14"
+requires-python = ">=3.11, <3.15"
 license = "BSD-3-Clause"
 keywords = []
 authors = [
@@ -19,15 +19,16 @@ authors = [
 classifiers = [
     "Development Status :: 4 - Beta",
     "Programming Language :: Python",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dependencies = [
-    "duckdb ~= 1.1.0",
-    "ibis-framework[duckdb,sqlite] >= 9.0",
+    "duckdb >= 1.5, < 2",  # ibis 12 calls fetch_arrow_table, removed in duckdb 2.0
+    "ibis-framework[duckdb,sqlite] >= 12.0",  # older ibis breaks on duckdb >= 1.5
     "loguru",
     "pandas >= 2.2, < 3",
     "pyarrow",

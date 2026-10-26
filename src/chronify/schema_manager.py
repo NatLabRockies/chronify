@@ -12,7 +12,9 @@ from chronify.models import TableSchema
 class SchemaManager:
     """Manages schemas for the Store. Provides a cache to avoid repeated database reads."""
 
-    SCHEMAS_TABLE = "schemas"
+    SCHEMAS_TABLE = "chronify_schemas"
+    # Name used by older databases. DuckDB parses DESCRIBE "schemas" as SHOW SCHEMAS.
+    LEGACY_SCHEMAS_TABLE = "schemas"
 
     def __init__(self, backend: IbisBackend) -> None:
         self._backend = backend
@@ -21,12 +23,26 @@ class SchemaManager:
         # only in memory so that no row outlives the object it describes.
         self._temp_names: set[str] = set()
 
+        self._migrate_legacy_schemas_table()
         if self._backend.has_table(self.SCHEMAS_TABLE):
             logger.info("Loaded existing database {}", self._backend.database)
             self.rebuild_cache()
         else:
             self._create_schemas_table()
             logger.info("Initialized new database: {}", self._backend.database)
+
+    def _migrate_legacy_schemas_table(self) -> None:
+        """Rename the schemas table of a database created by an older version."""
+        if self._backend.has_table(self.SCHEMAS_TABLE) or not self._backend.has_table(
+            self.LEGACY_SCHEMAS_TABLE
+        ):
+            return
+        # Only take over a table with chronify's layout, not a user table that
+        # happens to be named "schemas".
+        if set(self._backend.table(self.LEGACY_SCHEMAS_TABLE).columns) != {"name", "schema"}:
+            return
+        self._backend.rename_table(self.LEGACY_SCHEMAS_TABLE, self.SCHEMAS_TABLE)
+        logger.info("Renamed table {} to {}", self.LEGACY_SCHEMAS_TABLE, self.SCHEMAS_TABLE)
 
     def _create_schemas_table(self) -> None:
         # Uniqueness of `name` is enforced in `add_schema` rather than via a

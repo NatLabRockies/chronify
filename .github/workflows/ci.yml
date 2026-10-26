@@ -15,7 +15,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.12", "3.13", "3.14"]
         # TODO: skip spark on Windows
         #os: [ubuntu-latest, windows-latest]
         os: [ubuntu-latest]

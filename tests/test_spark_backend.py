@@ -10,6 +10,7 @@ import pytest
 from chronify.exceptions import TableNotStored
 from chronify.ibis.spark_backend import SparkBackend
 from chronify.models import TableSchema
+from chronify.schema_manager import SchemaManager
 from chronify.store import Store
 from chronify.time import TimeIntervalType
 from chronify.time_configs import DatetimeRange
@@ -367,7 +368,7 @@ def test_spark_create_view_from_parquet(spark_store: Store, tmp_path: Path) -> N
     # Parquet views are persistent, so their schemas are persisted.
     view_schema = schema.model_copy(update={"name": "pq_view2"})
     spark_store.create_view_from_parquet(outfile, view_schema)
-    schemas = spark_store.backend.execute(spark_store.backend.table("schemas"))
+    schemas = spark_store.backend.execute(spark_store.backend.table(SchemaManager.SCHEMAS_TABLE))
     assert "pq_view2" in schemas["name"].tolist()
     assert not spark_store.backend._session.catalog.getTable("pq_view2").isTemporary
     spark_store.schema_manager.rebuild_cache()
@@ -651,3 +652,11 @@ def test_spark_partitioned_write_parquet_from_memtable(spark_store: Store, tmp_p
     out = pd.read_parquet(outdir).sort_values("a")
     assert out["a"].tolist() == [1, 2]
     assert out["b"].astype(str).tolist() == ["x", "y"]
+
+
+def test_spark_legacy_schemas_table_is_migrated(spark_store: Store) -> None:
+    backend = spark_store.backend
+    backend.rename_table(SchemaManager.SCHEMAS_TABLE, SchemaManager.LEGACY_SCHEMAS_TABLE)
+    SchemaManager(backend)
+    assert backend.has_table(SchemaManager.SCHEMAS_TABLE)
+    assert not backend.has_table(SchemaManager.LEGACY_SCHEMAS_TABLE)

@@ -229,6 +229,9 @@ class SparkBackend(IbisBackend):
             self._session.sql(f"DROP TABLE IF EXISTS {quoted_tmp}")
             self._remove_managed_table_location(tmp_name)
 
+    def rename_table(self, old_name: str, new_name: str) -> None:
+        self._connection.rename_table(old_name, new_name)
+
     def create_view_from_parquet(self, path: str, name: str) -> tuple[ibis.Table, ObjectType]:
         # Persistent view over the file itself, unlike create_view. ibis's
         # read_parquet would register an extra ibis_read_parquet_* temp view, and a

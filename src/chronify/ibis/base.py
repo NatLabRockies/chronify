@@ -257,6 +257,13 @@ class IbisBackend(ABC):
         """Drop a view from the database."""
         self.connection.drop_view(name, force=True)
 
+    def rename_table(self, old_name: str, new_name: str) -> None:
+        """Rename a table."""
+        # ibis implements rename_table only for some backends.
+        self.execute_sql(
+            f"ALTER TABLE {_quote_identifier(old_name)} RENAME TO {_quote_identifier(new_name)}"
+        )
+
     def list_tables(self) -> list[str]:
         """List all user tables in the database, excluding ibis memtables."""
         return [t for t in self.connection.list_tables() if not _MEMTABLE_NAME.match(t)]
@@ -276,7 +283,9 @@ class IbisBackend(ABC):
         target_columns = list(self.table(name).columns)
         _validate_insert_columns(name, target_columns, _get_columns(data))
         ordered = _select_columns(data, target_columns)
-        self.connection.insert(name, ordered)
+        # Qualified for the same reason as DuckDBBackend.table: ibis looks the table up
+        # with DESCRIBE, which DuckDB misparses for user tables named e.g. "tables".
+        self.connection.insert(name, ordered, database=self.connection.current_database)
         logger.trace("Inserted data into {}", name)
 
     def delete_rows(self, name: str, values: dict[str, Any]) -> None:
