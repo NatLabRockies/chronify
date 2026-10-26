@@ -365,22 +365,18 @@ class SQLiteBackend(IbisBackend):
         """
         con = self._connection.con
         plans: dict[str, dict[str, bool]] = {}
-        for (table,) in con.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-        ).fetchall():
-            declared = {
-                row[1]: row[2].upper()
-                for row in con.execute(f"PRAGMA table_info({_quote_identifier(table)})")
-            }
+        # Only registered tables are touched: a rebuild drops constraints and indexes,
+        # and other applications' tables may hold timestamps in other formats.
+        # Current chronify always declares TIMESTAMP / TIMESTAMPTZ, so after one
+        # migration this finds nothing.
+        rows = con.execute(
+            "SELECT m.name, p.name, upper(p.type) FROM sqlite_master AS m "
+            "JOIN pragma_table_info(m.name) AS p WHERE m.type = 'table'"
+        ).fetchall()
+        for table, col, typ in rows:
             registered = time_columns.get(table, {})
-            legacy = {
-                col: registered.get(col, False)
-                for col, typ in declared.items()
-                if typ == "DATETIME"
-                or (col in registered and typ not in ("TIMESTAMP", "TIMESTAMPTZ"))
-            }
-            if legacy:
-                plans[table] = legacy
+            if col in registered and typ not in ("TIMESTAMP", "TIMESTAMPTZ"):
+                plans.setdefault(table, {})[col] = registered[col]
 
         if not plans:
             return []

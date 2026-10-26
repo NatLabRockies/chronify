@@ -1421,6 +1421,9 @@ def test_migrate_legacy_sqlite_timestamps(tmp_path):
             ('2020-01-01 02:00:00.000000', 1, 3.0);
         CREATE TABLE tz_mapped AS SELECT id, timestamp, value FROM tz;
         CREATE VIEW tz_view AS SELECT tz.timestamp, tz.id, tz.value FROM tz;
+        CREATE TABLE events (id INTEGER PRIMARY KEY, ts DATETIME NOT NULL);
+        CREATE INDEX ix_events ON events (ts);
+        INSERT INTO events VALUES (1, '2020-01-01 00:00:00+05:00');
         """
     )
     con.executemany(
@@ -1428,9 +1431,21 @@ def test_migrate_legacy_sqlite_timestamps(tmp_path):
         [(s.name, s.model_dump_json()) for s in (tz_schema, mapped_schema, ntz_schema)],
     )
     con.commit()
+    events_ddl = con.execute(
+        "SELECT sql FROM sqlite_master WHERE tbl_name = 'events' ORDER BY name"
+    ).fetchall()
     con.close()
 
     store = Store.load_from_file(path, backend_name="sqlite")
+    # Tables not registered in the schemas table are left alone.
+    raw = store.backend.connection.con
+    assert (
+        raw.execute(
+            "SELECT sql FROM sqlite_master WHERE tbl_name = 'events' ORDER BY name"
+        ).fetchall()
+        == events_ddl
+    )
+    assert raw.execute("SELECT ts FROM events").fetchall() == [("2020-01-01 00:00:00+05:00",)]
     expected_tz = pd.date_range("2020-01-01 05:00", periods=3, freq="h", tz="UTC")
     for name in ("tz", "tz_mapped"):
         df = store.read_table(name).execute().sort_values("timestamp")
@@ -1452,7 +1467,9 @@ def test_migrate_legacy_sqlite_timestamps(tmp_path):
 
     # Second load is a no-op.
     store = Store.load_from_file(path, backend_name="sqlite")
-    assert store.backend.migrate_legacy_timestamps({}) == []
+    time_columns = {"tz": {"timestamp": True}, "tz_mapped": {"timestamp": True}}
+    time_columns["ntz"] = {"timestamp": False}
+    assert store.backend.migrate_legacy_timestamps(time_columns) == []
     store.dispose()
 
 
