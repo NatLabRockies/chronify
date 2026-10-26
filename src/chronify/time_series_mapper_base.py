@@ -277,6 +277,12 @@ def _apply_mapping(  # noqa: C901
                 left_col = left_col.cast(right_col.type())
             else:
                 right_col = right_col.cast(left_col.type())
+            # SQLite stores timestamps as ISO text, and a timestamp cast compiles to
+            # STRFTIME, which changes the text format. Normalize both sides so they match.
+            if backend.name == "sqlite" and left_col.type().is_timestamp():
+                fmt = "%Y-%m-%d %H:%M:%f"
+                left_col = left_col.strftime(fmt)
+                right_col = right_col.strftime(fmt)
         predicates.append(left_col == right_col)
 
     # Perform the join

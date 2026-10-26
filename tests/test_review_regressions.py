@@ -124,6 +124,30 @@ def test_apply_mapping_casts_string_keys_numerically(iter_backends):
     assert len(result) == 3
 
 
+@pytest.mark.parametrize("case", ["string_source", "naive_source", "naive_mapping"])
+def test_apply_mapping_joins_mismatched_timestamp_keys(iter_all_backends, case):
+    """Timestamp join keys of different types must still match. On SQLite, casting
+    one side reformats the stored text, which silently dropped every row."""
+    backend = iter_all_backends
+    df = _make_tz_df(num_ids=1)
+    timestamps = df["timestamp"]
+    df_mapping = pd.DataFrame({"from_timestamp": timestamps, "factor": 1.0})
+    if case == "string_source":
+        df["timestamp"] = timestamps.dt.strftime("%Y-%m-%dT%H:%M:%S")
+    elif case == "naive_source":
+        df["timestamp"] = timestamps.dt.tz_localize(None)
+    else:
+        df_mapping["from_timestamp"] = timestamps.dt.tz_localize(None)
+    backend.create_table("src_ts_key", df)
+    backend.create_table("map_ts_key", df_mapping)
+
+    _apply_mapping(
+        "map_ts_key", _make_tz_schema("src_ts_key"), _make_tz_schema("dst_ts_key"), backend
+    )
+    result = backend.execute(backend.table("dst_ts_key"))
+    assert len(result) == 3
+
+
 def test_read_raw_query_supports_non_select_statements(iter_stores_by_engine):
     """read_raw_query is a raw escape hatch: backend-specific statements that
     are not SELECT-shaped must work."""
