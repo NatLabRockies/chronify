@@ -29,7 +29,7 @@ from chronify.utils.sql import make_temp_view_name
 try:
     from ibis.backends.pyspark import Backend as _IbisPySparkBackend
 except ImportError:  # pyspark is not installed; SparkBackend.__init__ raises a clear error.
-    _IbisPySparkBackend = object  # type: ignore[misc,assignment]
+    _IbisPySparkBackend = object
 
 
 _SESSION_TZ_KEY = "spark.sql.session.timeZone"

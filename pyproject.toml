@@ -42,12 +42,12 @@ dependencies = [
 [project.optional-dependencies]
 spark = [
     "ibis-framework[pyspark]",
-    "pyspark == 4.1.1",
+    "pyspark == 4.0.4",  # ibis 12 requires pyspark < 4.1
 ]
 
 dev = [
     "mypy >= 1.15, < 2",
-    "pandas-stubs",
+    "pandas-stubs < 3",  # match pandas < 3
     "pre-commit",
     "pytest",
     "pytest-cov",

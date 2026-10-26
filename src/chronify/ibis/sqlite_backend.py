@@ -27,6 +27,9 @@ from chronify.ibis.base import (
 from chronify.time import TimeDataType
 from chronify.time_configs import TimeBaseModel
 
+# Series.where accepts None as the replacement, but pandas-stubs doesn't allow it.
+_NONE: Any = None
+
 
 def _adapt_value(v: Any) -> Any:
     """Convert a value for SQLite parameterized insertion.
@@ -62,7 +65,7 @@ def _adapt_column(s: pd.Series) -> list[Any]:
                 for d in delta.dropna().unique()
             }
             out = out + delta.map(offsets)
-        return out.astype(object).where(s.notna(), None).tolist()
+        return out.astype(object).where(s.notna(), _NONE).tolist()
     if pd.api.types.infer_dtype(s, skipna=True) in (
         "string",
         "integer",
@@ -71,7 +74,7 @@ def _adapt_column(s: pd.Series) -> list[Any]:
         "empty",
     ):
         # astype(object) yields Python scalars, which sqlite3 binds natively.
-        return s.astype(object).where(s.notna(), None).tolist()
+        return s.astype(object).where(s.notna(), _NONE).tolist()
     return [_adapt_value(v) for v in s]
 
 

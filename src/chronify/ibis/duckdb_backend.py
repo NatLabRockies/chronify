@@ -72,7 +72,7 @@ class DuckDBBackend(IbisBackend):
         # Bypass Ibis's generic per-column pandas materialization; Arrow's
         # to_pandas() is much faster.
         if isinstance(expr, ibis.Table):
-            return self._connection.to_pyarrow(expr).to_pandas()
+            return cast(pd.DataFrame, self._connection.to_pyarrow(expr).to_pandas())
         return cast(pd.DataFrame, self._connection.execute(expr))
 
     def execute_sql_to_df(self, query: str, params: Any = None) -> pd.DataFrame:
