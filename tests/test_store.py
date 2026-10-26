@@ -1681,3 +1681,25 @@ def test_sqlite_create_table_from_memtable():
     assert len(backend.execute(backend.table("x"))) == 3
     with pytest.raises(InvalidParameter):
         backend.delete_rows("x", {})
+
+
+def test_convert_time_zone_failed_add_schema_leaves_no_table(
+    iter_stores_by_engine: Store, monkeypatch
+):
+    store = iter_stores_by_engine
+    schema = _hourly_schema("src", ZoneInfo("UTC"))
+    store.ingest_table(_hourly_frame(schema, 1), schema)
+    add_schema = store.schema_manager.add_schema
+
+    def fail(*args, **kwargs):
+        msg = "add_schema failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(store.schema_manager, "add_schema", fail)
+    with pytest.raises(RuntimeError, match="add_schema failed"):
+        store.convert_time_zone(schema.name, ZoneInfo("US/Mountain"))
+    assert store.list_tables() == [schema.name]
+
+    monkeypatch.setattr(store.schema_manager, "add_schema", add_schema)
+    dst_schema = store.convert_time_zone(schema.name, ZoneInfo("US/Mountain"))
+    assert store.read_table(dst_schema.name).count().execute() == 24

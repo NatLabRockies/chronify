@@ -294,6 +294,16 @@ class Store:
             _safe_cleanup_after_ingest_error(self._backend, self._schema_mgr, name, table_existed)
             raise
 
+    def _create_with_schema(self, schema: TableSchema, create: Callable[[], None]) -> None:
+        """Create the table and register its schema atomically."""
+
+        def run() -> bool:
+            create()
+            self._schema_mgr.add_schema(schema)
+            return True
+
+        self._run_ingest(schema.name, run)
+
     def _ingest_from_csvs(
         self,
         paths: Iterable[Path | str],
@@ -690,16 +700,18 @@ class Store:
             raise TableAlreadyExists(msg)
 
         src_schema = self._schema_mgr.get_schema(src_name)
-        map_time(
-            self._backend,
-            src_schema,
+        self._create_with_schema(
             dst_schema,
-            data_adjustment=data_adjustment,
-            wrap_time_allowed=wrap_time_allowed,
-            output_file=output_file,
-            check_mapped_timestamps=check_mapped_timestamps,
+            lambda: map_time(
+                self._backend,
+                src_schema,
+                dst_schema,
+                data_adjustment=data_adjustment,
+                wrap_time_allowed=wrap_time_allowed,
+                output_file=output_file,
+                check_mapped_timestamps=check_mapped_timestamps,
+            ),
         )
-        self._schema_mgr.add_schema(dst_schema)
 
     def convert_time_zone(
         self,
@@ -770,11 +782,13 @@ class Store:
             msg = dst_schema.name
             raise TableAlreadyExists(msg)
 
-        tzc.convert_time_zone(
-            output_file=output_file,
-            check_mapped_timestamps=check_mapped_timestamps,
+        self._create_with_schema(
+            dst_schema,
+            lambda: tzc.convert_time_zone(
+                output_file=output_file,
+                check_mapped_timestamps=check_mapped_timestamps,
+            ),
         )
-        self._schema_mgr.add_schema(dst_schema)
         return dst_schema
 
     def convert_time_zone_by_column(
@@ -857,11 +871,13 @@ class Store:
             msg = dst_schema.name
             raise TableAlreadyExists(msg)
 
-        tzc.convert_time_zone(
-            output_file=output_file,
-            check_mapped_timestamps=check_mapped_timestamps,
+        self._create_with_schema(
+            dst_schema,
+            lambda: tzc.convert_time_zone(
+                output_file=output_file,
+                check_mapped_timestamps=check_mapped_timestamps,
+            ),
         )
-        self._schema_mgr.add_schema(dst_schema)
         return dst_schema
 
     def localize_time_zone(
@@ -939,11 +955,13 @@ class Store:
             msg = dst_schema.name
             raise TableAlreadyExists(msg)
 
-        tzl.localize_time_zone(
-            output_file=output_file,
-            check_mapped_timestamps=check_mapped_timestamps,
+        self._create_with_schema(
+            dst_schema,
+            lambda: tzl.localize_time_zone(
+                output_file=output_file,
+                check_mapped_timestamps=check_mapped_timestamps,
+            ),
         )
-        self._schema_mgr.add_schema(dst_schema)
         return dst_schema
 
     def localize_time_zone_by_column(
@@ -1026,11 +1044,13 @@ class Store:
             msg = dst_schema.name
             raise TableAlreadyExists(msg)
 
-        tzl.localize_time_zone(
-            output_file=output_file,
-            check_mapped_timestamps=check_mapped_timestamps,
+        self._create_with_schema(
+            dst_schema,
+            lambda: tzl.localize_time_zone(
+                output_file=output_file,
+                check_mapped_timestamps=check_mapped_timestamps,
+            ),
         )
-        self._schema_mgr.add_schema(dst_schema)
         return dst_schema
 
     def read_query(self, query: ibis.Table | str) -> ibis.Table:
