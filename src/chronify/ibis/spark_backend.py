@@ -251,7 +251,11 @@ class SparkBackend(IbisBackend):
 
     def execute_sql_to_df(self, query: str, params: Any = None) -> pd.DataFrame:
         logger.trace("execute_sql_to_df: {}", query)
-        df = self._session.sql(query, args=params) if params else self._session.sql(query)
+        df = (
+            self._session.sql(query, args=params)
+            if params is not None
+            else self._session.sql(query)
+        )
         return cast(pd.DataFrame, df.toPandas())
 
     def _adapt_arg(self, v: Any) -> Any:

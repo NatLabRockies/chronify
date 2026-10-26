@@ -237,3 +237,29 @@ def test_sqlite_expression_writes_match_dataframe_writes(monkeypatch):
 
     backend.insert("empty", src.select(list(reversed(src.columns))))
     assert _sqlite_rows_and_types(backend, "empty") == expected
+
+
+def test_sqlite_adapt_column_matches_adapt_value() -> None:
+    from chronify.ibis.sqlite_backend import _adapt_column, _adapt_value
+
+    ts = pd.Series(pd.date_range("2020-01-01", periods=4, freq="h"))
+    ts[1] = pd.NaT
+    ts[2] += pd.Timedelta(microseconds=123)
+    df = pd.DataFrame(
+        {
+            "naive": ts,
+            "utc": ts.dt.tz_localize("UTC"),
+            "dst": ts.dt.tz_localize("UTC").dt.tz_convert("America/Denver"),
+            "nanos": ts + pd.Timedelta(nanoseconds=5),
+            "int": [1, 2, 3, 4],
+            "nullable_int": pd.array([1, None, 3, 4], dtype="Int64"),
+            "float": [1.5, float("nan"), 3.0, 4.0],
+            "str": ["a", None, "c", "d"],
+            "bool": [True, False, True, False],
+        }
+    )
+    for col in df.columns:
+        expected = [_adapt_value(v) for v in df[col]]
+        actual = _adapt_column(df[col])
+        assert actual == expected, col
+        assert [type(v) for v in actual] == [type(v) for v in expected], col

@@ -2,7 +2,7 @@
 
 import sqlite3
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from functools import singledispatchmethod
 from typing import Any, Iterable
@@ -45,6 +45,35 @@ def _adapt_value(v: Any) -> Any:
     if isinstance(v, (np.number, np.bool_)):
         return v.item()
     return v
+
+
+def _adapt_column(s: pd.Series) -> list[Any]:
+    """Vectorized equivalent of applying :func:`_adapt_value` to every cell."""
+    if pd.api.types.is_datetime64_any_dtype(s) and not s.dt.nanosecond.gt(0).any():
+        # Same text as datetime.isoformat(): microseconds only when nonzero,
+        # '+HH:MM' offset when tz-aware.
+        wall = s.dt.tz_localize(None) if s.dt.tz is not None else s
+        out = pd.Series(np.datetime_as_string(wall.to_numpy(), unit="us"), index=s.index)
+        out = out.where(s.dt.microsecond != 0, out.str[:19])
+        if s.dt.tz is not None:
+            # Offsets have few distinct values; let isoformat() render each one.
+            delta = wall - s.dt.tz_convert(None)
+            offsets = {
+                d: datetime(2000, 1, 1, tzinfo=timezone(d)).isoformat()[19:]
+                for d in delta.dropna().unique()
+            }
+            out = out + delta.map(offsets)
+        return out.astype(object).where(s.notna(), None).tolist()
+    if pd.api.types.infer_dtype(s, skipna=True) in (
+        "string",
+        "integer",
+        "floating",
+        "boolean",
+        "empty",
+    ):
+        # astype(object) yields Python scalars, which sqlite3 binds natively.
+        return s.astype(object).where(s.notna(), None).tolist()
+    return [_adapt_value(v) for v in s]
 
 
 class _NoCommitProxy:
@@ -179,7 +208,7 @@ class SQLiteBackend(IbisBackend):
         sql = f"INSERT INTO {quoted_name} ({col_list}) VALUES ({placeholders})"
 
         ordered = data.loc[:, columns]
-        rows = [tuple(_adapt_value(v) for v in row) for row in ordered.itertuples(index=False)]
+        rows = list(zip(*(_adapt_column(ordered[c]) for c in columns)))
         with closing(con.cursor()) as cursor:
             cursor.executemany(sql, rows)
         self._commit_if_needed()
