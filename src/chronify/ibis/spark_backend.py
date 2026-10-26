@@ -8,6 +8,7 @@ from urllib.parse import urlparse, unquote
 
 import ibis
 import ibis.expr.datatypes as dt
+import ibis.expr.types as ir
 import pandas as pd
 import pyarrow as pa
 from loguru import logger
@@ -17,6 +18,57 @@ from chronify.ibis.base import IbisBackend, ObjectType, _DATETIME_RANGES
 from chronify.time import TimeDataType
 from chronify.time_configs import TimeBaseModel
 from chronify.utils.sql import make_temp_view_name
+
+try:
+    from ibis.backends.pyspark import Backend as _IbisPySparkBackend
+except ImportError:  # pyspark is not installed; SparkBackend.__init__ raises a clear error.
+    _IbisPySparkBackend = object  # type: ignore[misc,assignment]
+
+
+_SESSION_TZ_KEY = "spark.sql.session.timeZone"
+
+
+@contextmanager
+def _pinned_utc(session: Any) -> Generator[None, None, None]:
+    """Temporarily set ``spark.sql.session.timeZone=UTC`` for the block.
+
+    Restores the previous value on exit. Not thread-safe with concurrent
+    users of the same Spark session.
+    """
+    prev = session.conf.get(_SESSION_TZ_KEY, None)
+    if prev == "UTC":
+        yield
+        return
+    session.conf.set(_SESSION_TZ_KEY, "UTC")
+    try:
+        yield
+    finally:
+        if prev is None:
+            session.conf.unset(_SESSION_TZ_KEY)
+        else:
+            session.conf.set(_SESSION_TZ_KEY, prev)
+
+
+class _UtcAwarePySparkBackend(_IbisPySparkBackend):  # type: ignore[misc]
+    """Ibis PySpark backend that materializes tz-aware timestamps under a UTC session.
+
+    PySpark renders TIMESTAMP values as naive wall-clock times in the session
+    time zone, and Ibis then labels them with the column's time zone (UTC; see
+    ``SparkBackend.apply_schema_types``). That is only correct under a UTC
+    session. Results with only tz-naive timestamps keep the caller's session
+    time zone, which is how callers that write tz-naive data under a non-UTC
+    session (e.g., dsgrid's ``custom_time_zone``) expect to read it back.
+    """
+
+    def execute(self, expr: ir.Expr, /, **kwargs: Any) -> Any:
+        if _has_tz_aware_timestamp(expr):
+            with _pinned_utc(self._session):
+                return super().execute(expr, **kwargs)
+        return super().execute(expr, **kwargs)
+
+
+def _has_tz_aware_timestamp(expr: ir.Expr) -> bool:
+    return any(t.is_timestamp() and t.timezone is not None for t in expr.as_table().schema().types)
 
 
 class SparkBackend(IbisBackend):
@@ -93,10 +145,12 @@ class SparkBackend(IbisBackend):
         session.conf.set("spark.sql.execution.arrow.pyspark.enabled", "true")
         # ibis.pyspark.connect() forces spark.sql.session.timeZone=UTC as a
         # side effect. Preserve the caller's tz; UTC is re-pinned locally by
-        # _pinned_utc_session() around operations that require it.
-        tz_key = "spark.sql.session.timeZone"
+        # _pinned_utc() around operations that require it, including every
+        # materialization of tz-aware timestamps (see _UtcAwarePySparkBackend).
+        tz_key = _SESSION_TZ_KEY
         prev_tz = session.conf.get(tz_key, None)
-        self._connection = ibis.pyspark.connect(session)
+        ibis.pyspark  # noqa: B018 -- loading the backend registers ibis.options.pyspark
+        self._connection = _UtcAwarePySparkBackend().connect(session)
         if prev_tz is None:
             session.conf.unset(tz_key)
         elif session.conf.get(tz_key, None) != prev_tz:
@@ -219,9 +273,8 @@ class SparkBackend(IbisBackend):
         ``TIMESTAMP`` column as ``Timestamp(timezone=None)`` even though the
         underlying values are true UTC instants. The cast to
         ``Timestamp(timezone="UTC")`` is intended as a metadata-only
-        re-annotation; this only holds while ``session.timeZone=UTC``, so
-        callers that materialize the result must do so under
-        :meth:`_pinned_utc_session` (as :meth:`read_query` does).
+        re-annotation; this only holds while ``session.timeZone=UTC``, which
+        the connection's ``execute`` ensures for tz-aware results.
         """
         if not isinstance(config, _DATETIME_RANGES):
             return expr
@@ -243,26 +296,9 @@ class SparkBackend(IbisBackend):
         with self._pinned_utc_session():
             return self.execute(self.apply_schema_types(expr, config))
 
-    @contextmanager
-    def _pinned_utc_session(self) -> Generator[None, None, None]:
-        """Temporarily set ``spark.sql.session.timeZone=UTC`` for the block.
-
-        Restores the previous value on exit. Not thread-safe with concurrent
-        users of the same Spark session.
-        """
-        key = "spark.sql.session.timeZone"
-        prev = self._session.conf.get(key, None)
-        if prev == "UTC":
-            yield
-            return
-        self._session.conf.set(key, "UTC")
-        try:
-            yield
-        finally:
-            if prev is None:
-                self._session.conf.unset(key)
-            else:
-                self._session.conf.set(key, prev)
+    def _pinned_utc_session(self) -> Any:
+        """Temporarily set ``spark.sql.session.timeZone=UTC`` for the block."""
+        return _pinned_utc(self._session)
 
     def _supports_parquet_partitioning(self) -> bool:
         return True

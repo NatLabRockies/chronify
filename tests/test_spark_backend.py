@@ -19,13 +19,14 @@ def _require_java_home() -> None:
 
 
 @pytest.fixture
-def spark_store(tmp_path: Path) -> Store:
+def spark_store(request: pytest.FixtureRequest, tmp_path: Path) -> Store:
+    """Parametrize indirectly with a session time zone; defaults to UTC."""
     _require_java_home()
     pyspark = pytest.importorskip("pyspark.sql")
     warehouse_dir = tmp_path / "spark-warehouse"
     session = (
         pyspark.SparkSession.builder.master("local")
-        .config("spark.sql.session.timeZone", "UTC")
+        .config("spark.sql.session.timeZone", getattr(request, "param", "UTC"))
         .config("spark.sql.parquet.outputTimestampType", "TIMESTAMP_MICROS")
         .config("spark.sql.warehouse.dir", str(warehouse_dir))
         .getOrCreate()
@@ -501,3 +502,63 @@ def test_spark_delete_rows_keeps_null_ids(spark_store: Store) -> None:
     ids = spark_store.read_table(schema.name).execute()["id"]
     assert sorted(ids.dropna().tolist()) == [2, 2]
     assert ids.isna().sum() == 2
+
+
+def _three_hours_schema(name: str, tz: ZoneInfo | None) -> TableSchema:
+    return TableSchema(
+        name=name,
+        value_column="value",
+        time_config=DatetimeRange(
+            time_column="timestamp",
+            start=datetime(2020, 1, 1, tzinfo=tz),
+            length=3,
+            resolution=timedelta(hours=1),
+        ),
+        time_array_id_columns=["id"],
+    )
+
+
+def _three_hours_frame(tz: str | None) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "id": 1,
+            "timestamp": pd.date_range("2020-01-01", periods=3, freq="h", tz=tz),
+            "value": [1.0, 2.0, 3.0],
+        }
+    )
+
+
+@pytest.mark.parametrize("spark_store", ["America/Denver"], indirect=True)
+def test_spark_non_utc_session_reads_tz_aware_as_utc(spark_store: Store) -> None:
+    """PySpark renders timestamps in the session tz; tz-aware reads must not shift."""
+    schema = _three_hours_schema("tz_aware", ZoneInfo("UTC"))
+    df = _three_hours_frame("UTC")
+    spark_store.ingest_table(df, schema)
+    table = spark_store.read_table(schema.name)
+    assert table.execute()["timestamp"].tolist() == df["timestamp"].tolist()
+    expected = [x.to_pydatetime() for x in df["timestamp"]]
+    assert table.to_pyarrow()["timestamp"].to_pylist() == expected
+    session = spark_store.backend._session  # type: ignore[attr-defined]
+    assert session.conf.get("spark.sql.session.timeZone") == "America/Denver"
+
+
+@pytest.mark.parametrize("spark_store", ["America/Denver"], indirect=True)
+def test_spark_non_utc_session_keeps_tz_naive_wall_clock(
+    spark_store: Store, tmp_path: Path
+) -> None:
+    """dsgrid writes tz-naive data under a non-UTC session (custom_time_zone) and
+    maps it with chronify under the same session. Those values must not shift."""
+    session = spark_store.backend._session  # type: ignore[attr-defined]
+    df = _three_hours_frame(None)
+    src = tmp_path / "src.parquet"
+    session.createDataFrame(df).write.parquet(str(src))
+    schema = _three_hours_schema("tz_naive", None)
+    spark_store.create_view_from_parquet(src, schema, bypass_checks=True)
+    assert spark_store.read_table(schema.name).execute()["timestamp"].tolist() == (
+        df["timestamp"].tolist()
+    )
+
+    out = tmp_path / "out.parquet"
+    spark_store.localize_time_zone(schema.name, ZoneInfo("EST"), output_file=out)
+    expected = (df["timestamp"] + pd.Timedelta(hours=5)).dt.tz_localize("UTC")
+    assert pd.read_parquet(out)["timestamp"].tolist() == expected.tolist()
