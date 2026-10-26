@@ -174,10 +174,11 @@ class Store:
             if not bypass_checks:
                 check_timestamps(self._backend, schema.name, schema)
         except InvalidTable:
+            # Use the Store methods so the schema registered above is removed too.
             if obj_type == ObjectType.TABLE:
-                self._backend.drop_table(schema.name)
+                self.drop_table(schema.name)
             else:
-                self._backend.drop_view(schema.name)
+                self.drop_view(schema.name)
             raise
 
     def _create_view_from_parquet(self, path: Path | str, schema: TableSchema) -> "ObjectType":

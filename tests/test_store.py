@@ -1504,6 +1504,26 @@ def test_map_time_fails_if_destination_exists(iter_stores_by_engine: Store, tmp_
         assert store.read_table("dst").execute()["id"].unique().tolist() == [99]
 
 
+def test_create_view_from_parquet_failed_check_removes_schema(
+    iter_stores_by_engine: Store, tmp_path
+):
+    store = iter_stores_by_engine
+    schema = _hourly_schema("pq", ZoneInfo("UTC"))
+    df = _hourly_frame(schema, 1)
+    bad = tmp_path / "bad.parquet"
+    df.iloc[:-1].to_parquet(bad)
+    with pytest.raises(InvalidTable):
+        store.create_view_from_parquet(bad, schema)
+    assert not store.has_table(schema.name)
+    with pytest.raises(TableNotStored):
+        store.schema_manager.get_schema(schema.name)
+
+    good = tmp_path / "good.parquet"
+    df.to_parquet(good)
+    store.create_view_from_parquet(good, schema)
+    assert len(store.read_table(schema.name).execute()) == len(df)
+
+
 def test_map_time_keeps_table_named_like_mapping_table(iter_stores_by_engine: Store):
     from chronify.time_series_mapper import map_time
 
