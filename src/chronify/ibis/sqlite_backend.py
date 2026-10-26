@@ -38,8 +38,6 @@ def _adapt_value(v: Any) -> Any:
     """
     if v is None or (pd.api.types.is_scalar(v) and pd.isna(v)):
         return None
-    if isinstance(v, datetime):
-        return v.isoformat()
     if hasattr(v, "isoformat"):
         return v.isoformat()
     # sqlite3 binds numpy integers (e.g., from nullable Int64 columns) as BLOBs.
@@ -243,10 +241,6 @@ class SQLiteBackend(IbisBackend):
         # recognize as a sqlite3 connection. Reads never commit, so the real one is safe.
         con = self._real_con or self._connection.con
         return pd.read_sql_query(query, con, params=params)
-
-    def dispose(self) -> None:
-        if self._owns_connection:
-            self._connection.disconnect()
 
     def backup(self, dst: str) -> None:
         if self._database is None:

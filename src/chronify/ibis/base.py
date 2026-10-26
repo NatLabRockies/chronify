@@ -211,6 +211,8 @@ class IbisBackend(ABC):
     """
 
     _in_transaction: bool
+    # False when the caller supplied the connection, so dispose() must not close it.
+    _owns_connection: bool = True
     # True if views are session-scoped and disappear when the connection closes.
     views_are_temporary: bool = False
 
@@ -432,8 +434,9 @@ class IbisBackend(ABC):
                 raise InvalidOperation(msg)
 
     def dispose(self) -> None:
-        """Dispose of the backend connection."""
-        self.connection.disconnect()
+        """Dispose of the backend connection, unless the caller owns it."""
+        if self._owns_connection:
+            self.connection.disconnect()
 
     @abstractmethod
     def backup(self, dst: str) -> None:

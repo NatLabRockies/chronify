@@ -14,19 +14,6 @@ _COLUMN_TYPES: dict[str, dt.DataType] = {
     "datetime_tz": dt.Timestamp(timezone="UTC"),
 }
 
-# Reverse mapping from Ibis types to DuckDB type strings
-_IBIS_TO_DUCKDB_MAP: dict[type[dt.DataType], str] = {
-    dt.Boolean: "BOOLEAN",
-    dt.Int8: "TINYINT",
-    dt.Int16: "SMALLINT",
-    dt.Int32: "INTEGER",
-    dt.Int64: "BIGINT",
-    dt.Float32: "FLOAT",
-    dt.Float64: "DOUBLE",
-    dt.String: "VARCHAR",
-    dt.Date: "DATE",
-}
-
 
 def get_ibis_type_from_string(type_name: str) -> dt.DataType:
     """Convert a string type name to an Ibis DataType.
@@ -40,16 +27,3 @@ def get_ibis_type_from_string(type_name: str) -> dt.DataType:
         msg = f"Unsupported type name: {type_name}. Valid types: {sorted(_COLUMN_TYPES.keys())}"
         raise ValueError(msg)
     return _COLUMN_TYPES[type_name]
-
-
-def get_duckdb_type_from_ibis(ibis_type: dt.DataType) -> str:
-    """Convert an Ibis DataType to a DuckDB type string."""
-    if isinstance(ibis_type, dt.Timestamp):
-        if ibis_type.timezone is not None:
-            return "TIMESTAMPTZ"
-        return "TIMESTAMP"
-    for cls, duckdb_name in _IBIS_TO_DUCKDB_MAP.items():
-        if isinstance(ibis_type, cls):
-            return duckdb_name
-    msg = f"Unsupported Ibis type for DuckDB: {ibis_type}"
-    raise ValueError(msg)

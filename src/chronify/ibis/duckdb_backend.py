@@ -106,10 +106,6 @@ class DuckDBBackend(IbisBackend):
             f"COPY ({sql}) TO {_quote_literal(path)} (FORMAT PARQUET, PARTITION_BY ({cols}))"
         )
 
-    def dispose(self) -> None:
-        if self._owns_connection:
-            self._connection.disconnect()
-
     def backup(self, dst: str) -> None:
         if self._database is None:
             msg = "backup is only supported with a database backed by a file"

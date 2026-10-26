@@ -3,10 +3,7 @@
 import ibis.expr.datatypes as dt
 import pytest
 
-from chronify.ibis.types import (
-    get_duckdb_type_from_ibis,
-    get_ibis_type_from_string,
-)
+from chronify.ibis.types import get_ibis_type_from_string
 
 
 class TestGetIbisTypeFromString:
@@ -23,19 +20,31 @@ class TestGetIbisTypeFromString:
             get_ibis_type_from_string("invalid")
 
 
-class TestGetDuckdbTypeFromIbis:
-    def test_common_types(self):
-        assert get_duckdb_type_from_ibis(dt.Boolean()) == "BOOLEAN"
-        assert get_duckdb_type_from_ibis(dt.Int64()) == "BIGINT"
-        assert get_duckdb_type_from_ibis(dt.Float64()) == "DOUBLE"
-        assert get_duckdb_type_from_ibis(dt.String()) == "VARCHAR"
+def test_read_csv_accepts_any_ibis_dtype(tmp_path):
+    """read_csv must accept ibis types beyond a handful of common ones."""
+    from datetime import datetime, timedelta
+    from decimal import Decimal
 
-    def test_timestamp_with_timezone(self):
-        assert get_duckdb_type_from_ibis(dt.Timestamp(timezone="UTC")) == "TIMESTAMPTZ"
+    from chronify.csv_io import read_csv
+    from chronify.models import ColumnDType, CsvTableSchema
+    from chronify.time_configs import DatetimeRange
 
-    def test_timestamp_without_timezone(self):
-        assert get_duckdb_type_from_ibis(dt.Timestamp(timezone=None)) == "TIMESTAMP"
-
-    def test_unsupported_type(self):
-        with pytest.raises(ValueError, match="Unsupported Ibis type for DuckDB"):
-            get_duckdb_type_from_ibis(dt.Binary())
+    path = tmp_path / "data.csv"
+    path.write_text("timestamp,count,price\n2020-01-01 00:00:00,1,1.25\n")
+    schema = CsvTableSchema(
+        time_config=DatetimeRange(
+            start=datetime(2020, 1, 1),
+            resolution=timedelta(hours=1),
+            length=1,
+            time_column="timestamp",
+        ),
+        column_dtypes=[
+            ColumnDType(name="timestamp", dtype=dt.Timestamp(scale=6)),
+            ColumnDType(name="count", dtype=dt.UInt32()),
+            ColumnDType(name="price", dtype=dt.Decimal(10, 2)),
+        ],
+        value_columns=["count", "price"],
+    )
+    df = read_csv(path, schema).to_df()
+    assert df["count"].tolist() == [1]
+    assert df["price"].tolist() == [Decimal("1.25")]
