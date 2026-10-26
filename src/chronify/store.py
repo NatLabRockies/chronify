@@ -175,7 +175,10 @@ class Store:
                 check_timestamps(self._backend, schema.name, schema)
             # Register the schema only after the checks pass so a failure
             # doesn't leave an orphaned schema row that blocks retries.
-            self._schema_mgr.add_schema(schema)
+            self._schema_mgr.add_schema(
+                schema,
+                temporary=obj_type == ObjectType.VIEW and self._backend.views_are_temporary,
+            )
         except Exception:
             if obj_type == ObjectType.TABLE:
                 self._backend.drop_table(schema.name)
@@ -1213,7 +1216,7 @@ class Store:
     def create_view(self, schema: TableSchema, stmt: ibis.Table) -> None:
         """Create a view in the database."""
         self._backend.create_view(schema.name, stmt)
-        self._schema_mgr.add_schema(schema)
+        self._schema_mgr.add_schema(schema, temporary=self._backend.views_are_temporary)
 
     def drop_view(self, name: str, if_exists: bool = False) -> None:
         """Drop a view from the database."""

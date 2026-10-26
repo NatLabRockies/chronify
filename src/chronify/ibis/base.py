@@ -211,6 +211,8 @@ class IbisBackend(ABC):
     """
 
     _in_transaction: bool
+    # True if views are session-scoped and disappear when the connection closes.
+    views_are_temporary: bool = False
 
     @property
     @abstractmethod

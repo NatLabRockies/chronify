@@ -17,6 +17,9 @@ class SchemaManager:
     def __init__(self, backend: IbisBackend) -> None:
         self._backend = backend
         self._cache: dict[str, TableSchema] = {}
+        # Schemas of session-scoped objects (e.g., Spark temporary views). They are kept
+        # only in memory so that no row outlives the object it describes.
+        self._temp_names: set[str] = set()
 
         if self._backend.has_table(self.SCHEMAS_TABLE):
             logger.info("Loaded existing database {}", self._backend.database)
@@ -31,13 +34,16 @@ class SchemaManager:
         schema = ibis.schema({"name": "string", "schema": "string"})
         self._backend.create_table(self.SCHEMAS_TABLE, schema=schema)
 
-    def add_schema(self, schema: TableSchema) -> None:
-        """Add the schema to the store."""
+    def add_schema(self, schema: TableSchema, temporary: bool = False) -> None:
+        """Add the schema to the store. Temporary schemas are not persisted."""
         if schema.name in self._cache or self._schema_row_exists(schema.name):
             msg = f"A schema with name={schema.name!r} is already registered"
             raise InvalidParameter(msg)
-        df = pd.DataFrame({"name": [schema.name], "schema": [schema.model_dump_json()]})
-        self._backend.insert(self.SCHEMAS_TABLE, df)
+        if temporary:
+            self._temp_names.add(schema.name)
+        else:
+            df = pd.DataFrame({"name": [schema.name], "schema": [schema.model_dump_json()]})
+            self._backend.insert(self.SCHEMAS_TABLE, df)
         self._cache[schema.name] = schema
         logger.trace("Added schema for table {}", schema.name)
 
@@ -61,7 +67,10 @@ class SchemaManager:
 
     def remove_schema(self, name: str) -> None:
         """Remove the schema from the store."""
-        self._backend.delete_rows(self.SCHEMAS_TABLE, {"name": name})
+        if name in self._temp_names:
+            self._temp_names.discard(name)
+        else:
+            self._backend.delete_rows(self.SCHEMAS_TABLE, {"name": name})
         self._cache.pop(name, None)
 
     def list_schemas(self) -> list[TableSchema]:
@@ -70,8 +79,10 @@ class SchemaManager:
 
     def rebuild_cache(self) -> None:
         """Rebuild the cache of schemas."""
+        temp = {name: self._cache[name] for name in self._temp_names}
         self._cache.clear()
         self._rebuild_cache()
+        self._cache.update(temp)
 
     def _rebuild_cache(self) -> None:
         df = self._backend.execute(self._backend.table(self.SCHEMAS_TABLE))

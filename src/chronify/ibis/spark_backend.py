@@ -84,6 +84,9 @@ class SparkBackend(IbisBackend):
     Requires pyspark to be installed (pip install chronify[spark]).
     """
 
+    # ibis-pyspark creates views with CREATE TEMPORARY VIEW.
+    views_are_temporary = True
+
     def __init__(
         self,
         session: Any = None,
