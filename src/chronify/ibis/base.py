@@ -1,5 +1,6 @@
 """Abstract base class for Ibis database backends."""
 
+import re
 from abc import ABC, abstractmethod
 from collections import Counter
 from contextlib import contextmanager
@@ -25,6 +26,10 @@ from chronify.time_configs import (
 )
 
 _DATETIME_RANGES = (DatetimeRange, DatetimeRangeWithTZColumn)
+
+# ibis registers memtables as tables named ibis_<source>_memtable_<uid>
+# (pandas, pyarrow, polars, ...).
+_MEMTABLE_NAME = re.compile(r"^ibis_\w+_memtable_")
 
 
 def _check_one_config_per_datetime_column(configs: Iterable[TimeBaseModel]) -> None:
@@ -179,6 +184,12 @@ def _validate_insert_columns(
         raise InvalidParameter(msg)
 
 
+def _check_delete_values(values: dict[str, Any]) -> None:
+    if not values:
+        msg = "delete_rows requires at least one column value"
+        raise InvalidParameter(msg)
+
+
 def _quote_identifier(identifier: str) -> str:
     """Quote a SQL identifier with double quotes, escaping embedded double quotes."""
     escaped = identifier.replace('"', '""')
@@ -243,8 +254,8 @@ class IbisBackend(ABC):
         self.connection.drop_view(name, force=True)
 
     def list_tables(self) -> list[str]:
-        """List all user tables in the database."""
-        return cast(list[str], self.connection.list_tables())
+        """List all user tables in the database, excluding ibis memtables."""
+        return [t for t in self.connection.list_tables() if not _MEMTABLE_NAME.match(t)]
 
     def table(self, name: str) -> ibis.Table:
         """Return an ibis table expression for the named table."""
@@ -264,13 +275,21 @@ class IbisBackend(ABC):
         self.connection.insert(name, ordered)
         logger.trace("Inserted data into {}", name)
 
-    @abstractmethod
     def delete_rows(self, name: str, values: dict[str, Any]) -> None:
         """Delete rows from a table where every column equals its given value.
 
-        Identifiers must be quoted and values must be parameterized to avoid
-        SQL injection and to handle values containing quote characters.
+        Identifiers are quoted and values are parameterized to avoid SQL
+        injection and to handle values containing quote characters.
         """
+        _check_delete_values(values)
+        where = " AND ".join(f"{_quote_identifier(c)} = ?" for c in values)
+        sql = f"DELETE FROM {_quote_identifier(name)} WHERE {where}"
+        self.connection.con.execute(sql, [self._adapt_param(v) for v in values.values()])
+        logger.trace("Deleted rows from {} matching {}", name, values)
+
+    def _adapt_param(self, v: Any) -> Any:
+        """Convert a value for binding as a SQL parameter."""
+        return v
 
     def execute(self, expr: ir.Expr) -> pd.DataFrame:
         """Execute an ibis expression and return a DataFrame. Must not be called

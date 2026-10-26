@@ -1,4 +1,4 @@
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, Optional, cast
 from datetime import tzinfo
@@ -279,16 +279,19 @@ class Store:
         --------
         ingest_from_csv
         """
-        table_existed = self._backend.has_table(dst_schema.name)
+        return self._run_ingest(
+            dst_schema.name, lambda: self._ingest_from_csvs(paths, src_schema, dst_schema)
+        )
+
+    def _run_ingest(self, name: str, ingest: Callable[[], bool]) -> bool:
+        """Run ingest in a transaction, cleaning up the table and schema on failure."""
+        table_existed = self._backend.has_table(name)
         try:
             with self._backend.transaction():
-                created_table = self._ingest_from_csvs(paths, src_schema, dst_schema)
+                return ingest()
         except Exception:
-            _safe_cleanup_after_ingest_error(
-                self._backend, self._schema_mgr, dst_schema.name, table_existed
-            )
+            _safe_cleanup_after_ingest_error(self._backend, self._schema_mgr, name, table_existed)
             raise
-        return created_table
 
     def _ingest_from_csvs(
         self,
@@ -434,16 +437,9 @@ class Store:
         --------
         ingest_pivoted_table
         """
-        table_existed = self._backend.has_table(dst_schema.name)
-        try:
-            with self._backend.transaction():
-                created_table = self._ingest_pivoted_tables(data, src_schema, dst_schema)
-        except Exception:
-            _safe_cleanup_after_ingest_error(
-                self._backend, self._schema_mgr, dst_schema.name, table_existed
-            )
-            raise
-        return created_table
+        return self._run_ingest(
+            dst_schema.name, lambda: self._ingest_pivoted_tables(data, src_schema, dst_schema)
+        )
 
     def _ingest_pivoted_tables(
         self,
@@ -465,7 +461,12 @@ class Store:
         dst_schema: TableSchema,
     ) -> bool:
         assert src_schema.pivoted_dimension_name is not None
-        expr = data if isinstance(data, ibis.Table) else ibis.memtable(data)
+        # Normalize before wrapping: write_table passes ibis expressions through as-is.
+        expr = (
+            data
+            if isinstance(data, ibis.Table)
+            else ibis.memtable(self._backend._prepare_write_data(data, [dst_schema.time_config]))
+        )
         unpivoted = expr.pivot_longer(
             list(src_schema.value_columns),
             names_to=src_schema.pivoted_dimension_name,
@@ -574,16 +575,7 @@ class Store:
         if not data:
             return created_table
 
-        table_existed = self._backend.has_table(schema.name)
-        try:
-            with self._backend.transaction():
-                created_table = self._ingest_tables(data, schema, **kwargs)
-        except Exception:
-            _safe_cleanup_after_ingest_error(
-                self._backend, self._schema_mgr, schema.name, table_existed
-            )
-            raise
-        return created_table
+        return self._run_ingest(schema.name, lambda: self._ingest_tables(data, schema, **kwargs))
 
     def _ingest_tables(
         self,

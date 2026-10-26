@@ -1315,7 +1315,7 @@ def test_map_table_succeeds_when_backup_cleanup_fails(tmp_path, monkeypatch):
 def test_map_table_cleanup_handles_directory_staging(tmp_path, monkeypatch):
     """Spark writes parquet as a directory, not a file. Cleanup of a failed
     map must use a directory-safe delete instead of unlink()."""
-    from chronify.ibis.base import IbisBackend
+    from chronify.ibis import DuckDBBackend
 
     # Override write_parquet so the staging output is a directory, mirroring
     # how pyspark's Backend.to_parquet writes (a directory of part-* files).
@@ -1324,7 +1324,7 @@ def test_map_table_cleanup_handles_directory_staging(tmp_path, monkeypatch):
         out.mkdir(parents=True, exist_ok=True)
         (out / "part-0.parquet").write_bytes(b"not a real parquet")
 
-    monkeypatch.setattr(IbisBackend, "write_parquet", _write_dir)
+    monkeypatch.setattr(DuckDBBackend, "write_parquet", _write_dir)
 
     store = Store.create_in_memory_db()
     year = 2020
@@ -1592,3 +1592,64 @@ def test_map_index_time_twice_drops_intermediate(iter_stores_by_engine: Store):
         )
         assert len(store.read_table(name).execute()) == 24
     assert not any("_intermediate" in t for t in store.backend.list_tables())
+
+
+def _pivoted_tz_aware_inputs():
+    time_config = DatetimeRange(
+        time_column="timestamp",
+        start=datetime(2020, 1, 1),
+        length=4,
+        resolution=timedelta(hours=1),
+    )
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2020-01-01", periods=4, freq="h", tz="UTC"),
+            "d1": 1.0,
+            "d2": 2.0,
+        }
+    )
+    src = PivotedTableSchema(
+        time_config=time_config, pivoted_dimension_name="device", value_columns=["d1", "d2"]
+    )
+    dst = TableSchema(
+        name="devices",
+        value_column="value",
+        time_config=time_config,
+        time_array_id_columns=["device"],
+    )
+    return df, src, dst
+
+
+@pytest.mark.parametrize("backend_name", ["duckdb", "sqlite"])
+def test_ingest_pivoted_normalizes_timestamps_and_hides_memtables(backend_name):
+    """tz-aware input into a TIMESTAMP_NTZ schema, from pandas and Arrow."""
+    import pyarrow as pa
+
+    df, src, dst = _pivoted_tz_aware_inputs()
+    store = Store(backend_name=backend_name)
+    store.ingest_pivoted_table(df, src, dst)
+    store.ingest_pivoted_table(
+        pa.Table.from_pandas(df), src, dst.model_copy(update={"name": "devices2"})
+    )
+    assert not [t for t in store.list_tables() if "memtable" in t]
+    assert store.read_table("devices").count().execute() == 8
+
+
+def test_duckdb_write_partitioned_parquet(tmp_path):
+    df, src, dst = _pivoted_tz_aware_inputs()
+    store = Store()
+    store.ingest_pivoted_table(df, src, dst)
+    out = tmp_path / "out"
+    store.write_table_to_parquet("devices", out, partition_columns=["device"])
+    assert sorted(p.name for p in out.iterdir()) == ["device=d1", "device=d2"]
+
+
+def test_sqlite_create_table_from_memtable():
+    import ibis
+
+    backend = make_backend("sqlite")
+    backend.create_table("x", ibis.memtable(pd.DataFrame({"a": [1, 2]})))
+    backend.insert("x", ibis.memtable(pd.DataFrame({"a": [3]})))
+    assert len(backend.execute(backend.table("x"))) == 3
+    with pytest.raises(InvalidParameter):
+        backend.delete_rows("x", {})

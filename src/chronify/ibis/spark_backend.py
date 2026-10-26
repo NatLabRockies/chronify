@@ -16,7 +16,12 @@ import pyarrow as pa
 from loguru import logger
 
 from chronify.exceptions import ConflictingInputsError, InvalidOperation, InvalidParameter
-from chronify.ibis.base import IbisBackend, ObjectType, _DATETIME_RANGES
+from chronify.ibis.base import (
+    IbisBackend,
+    ObjectType,
+    _DATETIME_RANGES,
+    _check_delete_values,
+)
 from chronify.time import TimeDataType
 from chronify.time_configs import TimeBaseModel
 from chronify.utils.sql import make_temp_view_name
@@ -191,6 +196,7 @@ class SparkBackend(IbisBackend):
             return self._connection.create_table(name, obj=obj, schema=schema, overwrite=overwrite)
 
     def delete_rows(self, name: str, values: dict[str, Any]) -> None:
+        _check_delete_values(values)
         quoted_name = _quote_identifier(name)
         param_names = [f"p{i}" for i in range(len(values))]
         where = " AND ".join(f"{_quote_identifier(c)} = :{p}" for c, p in zip(values, param_names))
@@ -270,9 +276,10 @@ class SparkBackend(IbisBackend):
         return v
 
     def dispose(self) -> None:
-        self._connection.disconnect()
+        # ibis-pyspark's disconnect() only stops the session, which must not
+        # happen to a caller-provided one.
         if self._owns_session:
-            self._session.stop()
+            self._connection.disconnect()
 
     def backup(self, dst: str) -> None:
         msg = "backup is not supported for the Spark backend"

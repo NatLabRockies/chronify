@@ -8,6 +8,7 @@ from functools import singledispatchmethod
 from typing import Any, Iterable
 
 import ibis
+import ibis.expr.operations as ops
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -189,6 +190,10 @@ class SQLiteBackend(IbisBackend):
     def insert(self, name: str, data: pd.DataFrame | pa.Table | ibis.Table) -> None:
         if isinstance(data, pa.Table):
             data = data.to_pandas()
+        elif isinstance(data, ibis.Table) and _has_memtables(data):
+            # Memtables only exist once ibis registers them at execution, so the
+            # compiled SQL would reference a missing table.
+            data = data.execute()
         con = self._connection.con  # raw sqlite3 connection
         columns = list(self._connection.table(name).columns)
         _validate_insert_columns(name, columns, list(data.columns))
@@ -215,14 +220,12 @@ class SQLiteBackend(IbisBackend):
         logger.trace("Inserted {} rows into {}", len(data), name)
 
     def delete_rows(self, name: str, values: dict[str, Any]) -> None:
-        con = self._connection.con
-        quoted_name = _quote_identifier(name)
-        where = " AND ".join(f"{_quote_identifier(c)} = ?" for c in values)
-        sql = f"DELETE FROM {quoted_name} WHERE {where}"
-        # Adapt values so datetime predicates match the stored ISO strings.
-        con.execute(sql, [_adapt_value(v) for v in values.values()])
+        super().delete_rows(name, values)
         self._commit_if_needed()
-        logger.trace("Deleted rows from {} matching {}", name, values)
+
+    def _adapt_param(self, v: Any) -> Any:
+        # Datetime predicates must match the stored ISO strings.
+        return _adapt_value(v)
 
     def create_view_from_parquet(self, path: str, name: str) -> tuple[ibis.Table, ObjectType]:
         # SQLite can't read Parquet natively. Load into a table instead.
@@ -315,7 +318,11 @@ class SQLiteBackend(IbisBackend):
         return self._prepare_write_data(data.to_pandas(), configs)
 
     @_prepare_write_data.register
-    def _(self, data: ibis.Table, configs: Iterable[TimeBaseModel]) -> pd.DataFrame:
+    def _(self, data: ibis.Table, configs: Iterable[TimeBaseModel]) -> pd.DataFrame | ibis.Table:
+        # Copy in the database unless the data comes from Python (memtables) or
+        # its timestamp types need the pandas normalization below.
+        if not _has_memtables(data) and not _tz_mismatch(data, configs):
+            return data
         return self._prepare_write_data(data.execute(), configs)
 
     @_prepare_write_data.register
@@ -420,6 +427,23 @@ class SQLiteBackend(IbisBackend):
         con.execute(f"INSERT INTO {tmp} SELECT {', '.join(exprs)} FROM {quoted}")
         con.execute(f"DROP TABLE {quoted}")
         con.execute(f"ALTER TABLE {tmp} RENAME TO {quoted}")
+
+
+def _has_memtables(expr: ibis.Table) -> bool:
+    return bool(expr.op().find(ops.InMemoryTable))
+
+
+def _tz_mismatch(expr: ibis.Table, configs: Iterable[TimeBaseModel]) -> bool:
+    schema = expr.schema()
+    for config in configs:
+        if not isinstance(config, _DATETIME_RANGES) or config.time_column not in schema:
+            continue
+        dtype = schema[config.time_column]
+        if not dtype.is_timestamp():
+            continue
+        if (dtype.timezone is not None) != (config.dtype == TimeDataType.TIMESTAMP_TZ):
+            return True
+    return False
 
 
 def _infer_sqlite_path(connection: ibis.BaseBackend) -> str | None:

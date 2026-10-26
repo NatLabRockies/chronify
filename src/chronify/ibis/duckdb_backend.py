@@ -63,19 +63,6 @@ class DuckDBBackend(IbisBackend):
     def connection(self) -> ibis.BaseBackend:
         return self._connection
 
-    def list_tables(self) -> list[str]:
-        tables = self._connection.list_tables()
-        # Filter out internal ibis memtables
-        return [t for t in tables if not t.startswith("ibis_pandas_memtable_")]
-
-    def delete_rows(self, name: str, values: dict[str, Any]) -> None:
-        con = self._connection.con
-        quoted_name = _quote_identifier(name)
-        where = " AND ".join(f"{_quote_identifier(c)} = ?" for c in values)
-        sql = f"DELETE FROM {quoted_name} WHERE {where}"
-        con.execute(sql, list(values.values()))
-        logger.trace("Deleted rows from {} matching {}", name, values)
-
     def execute(self, expr: ir.Expr) -> pd.DataFrame:
         # Bypass Ibis's generic pandas materialization and use DuckDB's native
         # cursor.fetch_df(), which is zero-copy from Arrow.
@@ -100,6 +87,24 @@ class DuckDBBackend(IbisBackend):
             read_path = str(parquet_path).replace("\\", "/")
         self._connection.create_view(name, self._connection.read_parquet(read_path))
         return self.table(name), ObjectType.VIEW
+
+    def write_parquet(
+        self,
+        expr: ibis.Table,
+        path: str,
+        partition_by: list[str] | None = None,
+    ) -> None:
+        if not partition_by:
+            self._connection.to_parquet(expr, path)
+            return
+        # ibis-duckdb renders partition_by as a Python list repr, which DuckDB
+        # rejects, so issue the COPY directly.
+        self._connection._run_pre_execute_hooks(expr)
+        sql = self._connection.compile(expr)
+        cols = ", ".join(_quote_identifier(c) for c in partition_by)
+        self._connection.con.execute(
+            f"COPY ({sql}) TO {_quote_literal(path)} (FORMAT PARQUET, PARTITION_BY ({cols}))"
+        )
 
     def dispose(self) -> None:
         if self._owns_connection:
