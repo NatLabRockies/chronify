@@ -3,6 +3,7 @@
 import shutil
 from contextlib import contextmanager
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Generator, Iterable, cast
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -62,9 +63,8 @@ class _UtcAwarePySparkBackend(_IbisPySparkBackend):  # type: ignore[misc]
     PySpark renders TIMESTAMP values as naive wall-clock times in the session
     time zone, and Ibis then labels them with the column's time zone (UTC; see
     ``SparkBackend.apply_schema_types``). That is only correct under a UTC
-    session. Results with only tz-naive timestamps keep the caller's session
-    time zone, which is how callers that write tz-naive data under a non-UTC
-    session (e.g., dsgrid's ``custom_time_zone``) expect to read it back.
+    session. tz-naive data from Python is stored as TIMESTAMP_NTZ (see
+    ``_register_in_memory_table``), which renders the same under any session.
     """
 
     def execute(self, expr: ir.Expr, /, **kwargs: Any) -> Any:
@@ -72,6 +72,39 @@ class _UtcAwarePySparkBackend(_IbisPySparkBackend):  # type: ignore[misc]
             with _pinned_utc(self._session):
                 return super().execute(expr, **kwargs)
         return super().execute(expr, **kwargs)
+
+    def _register_in_memory_table(self, op: Any) -> None:
+        """Register tz-naive timestamp columns as TIMESTAMP_NTZ.
+
+        ibis declares them as TIMESTAMP, so Spark would interpret the wall-clock
+        values in the session time zone. Under a non-UTC session that shifts
+        Parquet exports and fails or merges hours at DST transitions.
+        """
+        from ibis.backends.pyspark.datatypes import PySparkSchema
+        from pyspark.sql.types import StructField, StructType, TimestampNTZType
+
+        if not any(t.is_timestamp() and t.timezone is None for t in op.schema.types):
+            super()._register_in_memory_table(op)
+            return
+        data = op.data.to_frame()
+        # Same conversion ibis applies: Spark's DecimalType needs Decimal values.
+        if decimals := [name for name, dtype in op.schema.items() if dtype.is_decimal()]:
+            data = data.assign(**{col: data[col].map(Decimal) for col in decimals})
+        fields = [
+            StructField(name, TimestampNTZType(), dtype.nullable)
+            if dtype.is_timestamp() and dtype.timezone is None
+            else field
+            for field, (name, dtype) in zip(
+                PySparkSchema.from_ibis(op.schema).fields, op.schema.items()
+            )
+        ]
+        schema = StructType(fields)
+        try:
+            df = self._session.createDataFrame(data, schema=schema, verifySchema=False)
+        except TypeError:
+            # remote sessions don't have optional schema verification
+            df = self._session.createDataFrame(data, schema=schema)
+        df.createOrReplaceTempView(op.name)
 
 
 def _has_tz_aware_timestamp(expr: ir.Expr) -> bool:

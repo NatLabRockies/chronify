@@ -639,6 +639,55 @@ def test_spark_non_utc_session_tz_naive_ingest_passes_checks(spark_store: Store)
     )
 
 
+@pytest.mark.parametrize("spark_store", ["America/Denver"], indirect=True)
+@pytest.mark.parametrize("start", [datetime(2020, 3, 8), datetime(2020, 11, 1)])
+def test_spark_dst_session_tz_naive_ingest_across_transition(
+    spark_store: Store, start: datetime
+) -> None:
+    """tz-naive values in a DST gap or overlap of the session time zone must be
+    stored unchanged, not rejected or merged."""
+    schema = TableSchema(
+        name="tz_naive_dst",
+        value_column="value",
+        time_config=DatetimeRange(
+            time_column="timestamp", start=start, length=6, resolution=timedelta(hours=1)
+        ),
+        time_array_id_columns=["id"],
+    )
+    df = pd.DataFrame(
+        {"id": 1, "timestamp": pd.date_range(start, periods=6, freq="h"), "value": 1.0}
+    )
+    spark_store.ingest_table(df, schema)
+    session = spark_store.backend._session  # type: ignore[attr-defined]
+    assert dict(session.table(schema.name).dtypes)["timestamp"] == "timestamp_ntz"
+    actual = spark_store.read_table(schema.name).execute()["timestamp"]
+    assert sorted(actual.tolist()) == df["timestamp"].tolist()
+
+
+@pytest.mark.parametrize("spark_store", ["EST"], indirect=True)
+def test_spark_non_utc_session_tz_naive_parquet_export_and_mixed_read(
+    spark_store: Store, tmp_path: Path
+) -> None:
+    """tz-naive values must keep their wall-clock time in Parquet exports and when
+    read in the same result as a tz-aware column."""
+    naive = _three_hours_schema("naive", None)
+    aware = _three_hours_schema("aware", ZoneInfo("UTC"))
+    spark_store.ingest_table(_three_hours_frame(None), naive)
+    spark_store.ingest_table(_three_hours_frame("UTC"), aware)
+    expected = _three_hours_frame(None)["timestamp"].tolist()
+
+    out = tmp_path / "naive.parquet"
+    spark_store.write_table_to_parquet(naive.name, out)
+    assert sorted(pd.read_parquet(out)["timestamp"].tolist()) == expected
+
+    left = spark_store.read_table(naive.name)
+    right = spark_store.read_table(aware.name)
+    joined = left.join(right, left["value"] == right["value"]).select(
+        naive=left["timestamp"], aware=right["timestamp"]
+    )
+    assert sorted(joined.execute()["naive"].tolist()) == expected
+
+
 def test_spark_create_table_removes_stale_mixed_case_location(
     spark_store: Store, tmp_path: Path
 ) -> None:
