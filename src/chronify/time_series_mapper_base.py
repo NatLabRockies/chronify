@@ -139,7 +139,7 @@ def apply_mapping(  # noqa: C901
                 check_name = to_schema.name
                 if staging_path is not None:
                     _, created_tmp_obj = backend.create_view_from_parquet(
-                        str(staging_path), check_view_name
+                        str(staging_path), check_view_name, [to_schema.time_config]
                     )
                     check_name = check_view_name
                 check_timestamps(

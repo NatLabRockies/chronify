@@ -326,11 +326,14 @@ class IbisBackend(ABC):
             self.connection.to_parquet(expr, path)
 
     @abstractmethod
-    def create_view_from_parquet(self, path: str, name: str) -> tuple[ibis.Table, ObjectType]:
+    def create_view_from_parquet(
+        self, path: str, name: str, configs: Iterable[TimeBaseModel] = ()
+    ) -> tuple[ibis.Table, ObjectType]:
         """Create a view or table backed by a Parquet file.
 
         Returns the table expression and the type of object created, since some
-        backends (e.g., SQLite) must create a table instead of a view.
+        backends (e.g., SQLite) must create a table instead of a view. ``configs``
+        are used to normalize timestamps when the backend copies the data.
         """
 
     def has_table(self, name: str) -> bool:

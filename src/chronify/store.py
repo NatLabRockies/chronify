@@ -169,7 +169,9 @@ class Store:
         self, path: Path, schema: TableSchema, bypass_checks: bool = False
     ) -> None:
         """Load a table into the database from a Parquet file."""
-        _, obj_type = self._backend.create_view_from_parquet(str(to_path(path)), schema.name)
+        _, obj_type = self._backend.create_view_from_parquet(
+            str(to_path(path)), schema.name, [schema.time_config]
+        )
         try:
             if not bypass_checks:
                 check_timestamps(self._backend, schema.name, schema)

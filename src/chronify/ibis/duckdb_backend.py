@@ -1,7 +1,7 @@
 """DuckDB backend implementation for Ibis."""
 
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Iterable, cast
 
 import ibis
 import ibis.expr.types as ir
@@ -10,6 +10,7 @@ from loguru import logger
 
 from chronify.exceptions import ConflictingInputsError, InvalidOperation, InvalidParameter
 from chronify.ibis.base import IbisBackend, ObjectType, _quote_identifier
+from chronify.time_configs import TimeBaseModel
 from chronify.utils.sql import make_temp_view_name
 
 
@@ -81,7 +82,9 @@ class DuckDBBackend(IbisBackend):
         cursor = con.execute(query, params) if params is not None else con.execute(query)
         return cast(pd.DataFrame, cursor.fetch_df())
 
-    def create_view_from_parquet(self, path: str, name: str) -> tuple[ibis.Table, ObjectType]:
+    def create_view_from_parquet(
+        self, path: str, name: str, configs: Iterable[TimeBaseModel] = ()
+    ) -> tuple[ibis.Table, ObjectType]:
         # Absolute path because the view is persisted and may be read from a different cwd.
         parquet_path = Path(path).resolve()
         if parquet_path.is_dir():

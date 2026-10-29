@@ -218,3 +218,31 @@ def test_base_execute_sql_to_df_rejects_params_when_unsupported(create_duckdb_ba
     backend = create_duckdb_backend
     with pytest.raises(InvalidParameter):
         IbisBackend.execute_sql_to_df(backend, "SELECT 1", params=(1,))
+
+
+def test_sqlite_parquet_with_non_utc_timestamps_maps_all_rows(tmp_path: Path):
+    """SQLite copies Parquet into a table; tz-aware values must be stored as UTC
+    text, or joins against mapping tables silently match nothing."""
+    store = Store(backend_name="sqlite")
+    tz = ZoneInfo("Etc/GMT+5")
+    start = datetime(2020, 1, 1, tzinfo=tz)
+    df = pd.DataFrame(
+        {
+            "id": 1,
+            "timestamp": pd.date_range(start, periods=3, freq="1h"),
+            "value": [1.0, 2.0, 3.0],
+        }
+    )
+    path = tmp_path / "tz.parquet"
+    df.to_parquet(path)
+    schema = TableSchema(
+        name="src",
+        value_column="value",
+        time_config=DatetimeRange(
+            time_column="timestamp", start=start, length=3, resolution=timedelta(hours=1)
+        ),
+        time_array_id_columns=["id"],
+    )
+    store.create_view_from_parquet(path, schema)
+    dst = store.convert_time_zone("src", ZoneInfo("US/Mountain"))
+    assert len(store.read_table(dst.name).execute()) == 3

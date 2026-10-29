@@ -228,10 +228,13 @@ class SQLiteBackend(IbisBackend):
         # Datetime predicates must match the stored ISO strings.
         return _adapt_value(v)
 
-    def create_view_from_parquet(self, path: str, name: str) -> tuple[ibis.Table, ObjectType]:
-        # SQLite can't read Parquet natively. Load into a table instead.
-        df = pd.read_parquet(path)
-        return self.create_table(name, obj=df), ObjectType.TABLE
+    def create_view_from_parquet(
+        self, path: str, name: str, configs: Iterable[TimeBaseModel] = ()
+    ) -> tuple[ibis.Table, ObjectType]:
+        # SQLite can't read Parquet natively. Load into a table instead, normalizing
+        # timestamps like any other write so joins on the stored text match.
+        self.write_table(pd.read_parquet(path), name, configs, if_exists="fail")
+        return self.table(name), ObjectType.TABLE
 
     def execute_sql(self, query: str) -> None:
         logger.trace("execute_sql: {}", query)

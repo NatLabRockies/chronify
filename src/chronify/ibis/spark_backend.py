@@ -3,7 +3,7 @@
 import shutil
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Generator, cast
+from typing import Any, Generator, Iterable, cast
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse, unquote
@@ -232,7 +232,9 @@ class SparkBackend(IbisBackend):
     def rename_table(self, old_name: str, new_name: str) -> None:
         self._connection.rename_table(old_name, new_name)
 
-    def create_view_from_parquet(self, path: str, name: str) -> tuple[ibis.Table, ObjectType]:
+    def create_view_from_parquet(
+        self, path: str, name: str, configs: Iterable[TimeBaseModel] = ()
+    ) -> tuple[ibis.Table, ObjectType]:
         # Persistent view over the file itself, unlike create_view. ibis's
         # read_parquet would register an extra ibis_read_parquet_* temp view, and a
         # persistent view can't reference it. Absolute path because the view may be
