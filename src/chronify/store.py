@@ -116,7 +116,7 @@ class Store:
         if not self.has_table(name):
             msg = f"{name=}"
             raise TableNotStored(msg)
-        return self._backend.table(name)
+        return self._typed_table(name)
 
     def has_table(self, name: str) -> bool:
         """Return True if the database has a table with the given name."""
@@ -130,7 +130,16 @@ class Store:
         """Return the ibis Table expression or None if it is not stored."""
         if not self.has_table(name):
             return None
-        return self._backend.table(name)
+        return self._typed_table(name)
+
+    def _typed_table(self, name: str) -> ibis.Table:
+        """Return the table with its registered schema's types applied, if it has one."""
+        expr = self._backend.table(name)
+        try:
+            schema = self._schema_mgr.get_schema(name)
+        except TableNotStored:
+            return expr
+        return self._backend.apply_schema_types(expr, schema.time_config)
 
     def backup(self, dst: Path | str, overwrite: bool = False) -> None:
         """Copy the database to a new location. Not yet supported for in-memory databases."""

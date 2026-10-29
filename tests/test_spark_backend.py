@@ -594,10 +594,15 @@ def test_spark_non_utc_session_reads_tz_aware_as_utc(spark_store: Store) -> None
     schema = _three_hours_schema("tz_aware", ZoneInfo("UTC"))
     df = _three_hours_frame("UTC")
     spark_store.ingest_table(df, schema)
-    table = spark_store.read_table(schema.name)
-    assert table.execute()["timestamp"].tolist() == df["timestamp"].tolist()
     expected = [x.to_pydatetime() for x in df["timestamp"]]
-    assert table.to_pyarrow()["timestamp"].to_pylist() == expected
+    for table in (
+        spark_store.read_table(schema.name),
+        spark_store.get_table(schema.name),
+        spark_store.try_get_table(schema.name),
+    ):
+        assert table is not None
+        assert table.execute()["timestamp"].tolist() == df["timestamp"].tolist()
+        assert table.to_pyarrow()["timestamp"].to_pylist() == expected
     session = spark_store.backend._session  # type: ignore[attr-defined]
     assert session.conf.get("spark.sql.session.timeZone") == "America/Denver"
 
