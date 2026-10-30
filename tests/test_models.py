@@ -1,14 +1,14 @@
 import pytest
-from sqlalchemy import BigInteger, Boolean, DateTime, Double, Integer, String
+import ibis.expr.datatypes as dt
 
 from chronify.models import ColumnDType, _check_name
 from chronify.exceptions import InvalidValue
 
 
 def test_column_dtypes() -> None:
-    ColumnDType(name="col1", dtype=Integer())
-    for dtype in (BigInteger, Boolean, DateTime, Double, String):
-        ColumnDType(name="col1", dtype=dtype())
+    ColumnDType(name="col1", dtype=dt.Int64())
+    for dtype_cls in (dt.Int64, dt.Boolean, dt.Timestamp, dt.Float64, dt.String):
+        ColumnDType(name="col1", dtype=dtype_cls())
 
     for string_type in ("int", "bigint", "bool", "datetime", "float", "str"):
         ColumnDType(name="col1", dtype=string_type)
