@@ -1729,3 +1729,34 @@ def test_convert_time_zone_failed_add_schema_leaves_no_table(
     monkeypatch.setattr(store.schema_manager, "add_schema", add_schema)
     dst_schema = store.convert_time_zone(schema.name, ZoneInfo("US/Mountain"))
     assert store.read_table(dst_schema.name).count().execute() == 24
+
+
+@pytest.mark.parametrize("data_tz", [None, "America/Denver"])
+@pytest.mark.parametrize("schema_tz", [None, ZoneInfo("UTC")])
+def test_ingest_ibis_table_normalizes_timestamps(iter_all_stores, data_tz, schema_tz):
+    """ibis.Table input whose tz-awareness differs from the schema matches pandas input."""
+    import ibis
+
+    store = iter_all_stores
+    timestamps = pd.date_range("2020-01-01", periods=4, freq="h", tz="UTC")
+    if data_tz is None:
+        timestamps = timestamps.tz_localize(None)
+    else:
+        timestamps = timestamps.tz_convert(data_tz)
+    df = pd.DataFrame({"timestamp": timestamps, "id": 1, "value": 1.0})
+    schema = TableSchema(
+        name="MixedCase",
+        value_column="value",
+        time_config=DatetimeRange(
+            time_column="timestamp",
+            start=datetime(2020, 1, 1, tzinfo=schema_tz),
+            length=4,
+            resolution=timedelta(hours=1),
+        ),
+        time_array_id_columns=["id"],
+    )
+    store.ingest_table(ibis.memtable(df), schema)
+    assert store.has_table("MixedCase")
+    assert store.read_table("MixedCase").count().execute() == 4
+    store.delete_rows("MixedCase", {"id": 1})
+    assert not store.has_table("MixedCase")

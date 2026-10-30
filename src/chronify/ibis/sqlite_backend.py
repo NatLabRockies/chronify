@@ -20,6 +20,7 @@ from chronify.ibis.base import (
     IbisBackend,
     ObjectType,
     _DATETIME_RANGES,
+    _mismatched_timestamp_types,
     _normalize_timestamps,
     _quote_identifier,
     _validate_insert_columns,
@@ -325,7 +326,7 @@ class SQLiteBackend(IbisBackend):
     def _(self, data: ibis.Table, configs: Iterable[TimeBaseModel]) -> pd.DataFrame | ibis.Table:
         # Copy in the database unless the data comes from Python (memtables) or
         # its timestamp types need the pandas normalization below.
-        if not _has_memtables(data) and not _tz_mismatch(data, configs):
+        if not _has_memtables(data) and not _mismatched_timestamp_types(data, configs):
             return data
         return self._prepare_write_data(data.execute(), configs)
 
@@ -431,19 +432,6 @@ class SQLiteBackend(IbisBackend):
 
 def _has_memtables(expr: ibis.Table) -> bool:
     return bool(expr.op().find(ops.InMemoryTable))
-
-
-def _tz_mismatch(expr: ibis.Table, configs: Iterable[TimeBaseModel]) -> bool:
-    schema = expr.schema()
-    for config in configs:
-        if not isinstance(config, _DATETIME_RANGES) or config.time_column not in schema:
-            continue
-        dtype = schema[config.time_column]
-        if not dtype.is_timestamp():
-            continue
-        if (dtype.timezone is not None) != (config.dtype == TimeDataType.TIMESTAMP_TZ):
-            return True
-    return False
 
 
 def _infer_sqlite_path(connection: ibis.BaseBackend) -> str | None:

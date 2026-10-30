@@ -9,6 +9,7 @@ from functools import singledispatch, singledispatchmethod
 from typing import Any, Generator, Iterable, cast
 
 import ibis
+import ibis.expr.datatypes as dt
 import ibis.expr.types as ir
 import pandas as pd
 import pyarrow as pa
@@ -124,6 +125,24 @@ def _normalize_arrow_timestamps(
             continue
         table = table.set_column(idx, table.column_names[idx], new_arr)
     return table
+
+
+def _mismatched_timestamp_types(
+    expr: ibis.Table, configs: Iterable[TimeBaseModel]
+) -> dict[str, dt.Timestamp]:
+    """Return the target type of each time column whose tz-awareness differs from its config."""
+    schema = expr.schema()
+    mismatched: dict[str, dt.Timestamp] = {}
+    for config in configs:
+        if not isinstance(config, _DATETIME_RANGES) or config.time_column not in schema:
+            continue
+        dtype = schema[config.time_column]
+        if not dtype.is_timestamp():
+            continue
+        wants_tz = config.dtype == TimeDataType.TIMESTAMP_TZ
+        if (dtype.timezone is not None) != wants_tz:
+            mismatched[config.time_column] = dt.Timestamp(timezone="UTC" if wants_tz else None)
+    return mismatched
 
 
 @singledispatch
@@ -423,7 +442,12 @@ class IbisBackend(ABC):
 
     @_prepare_write_data.register
     def _(self, data: ibis.Table, configs: Iterable[TimeBaseModel]) -> ibis.Table:
-        return data
+        # Casts must resolve in UTC (localize naive as UTC, convert aware to
+        # UTC); ibis pins DuckDB's TimeZone to UTC and Spark pins it in write_table.
+        types = _mismatched_timestamp_types(data, configs)
+        if not types:
+            return data
+        return data.mutate(**{col: data[col].cast(typ) for col, typ in types.items()})
 
     def _apply_if_exists(
         self,

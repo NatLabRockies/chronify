@@ -262,6 +262,21 @@ class SparkBackend(IbisBackend):
             self._session.sql(f"DROP TABLE IF EXISTS {quoted_tmp}")
             self._remove_managed_table_location(tmp_name)
 
+    def has_table(self, name: str) -> bool:
+        # Spark's catalog lowercases table names.
+        return name.lower() in {t.lower() for t in self.list_tables()}
+
+    def write_table(
+        self,
+        data: pd.DataFrame | pa.Table | ibis.Table,
+        name: str,
+        configs: Iterable[TimeBaseModel],
+        if_exists: str = "append",
+    ) -> None:
+        # Timestamp casts in _prepare_write_data use the session time zone.
+        with _pinned_utc(self._session):
+            super().write_table(data, name, configs, if_exists=if_exists)
+
     def rename_table(self, old_name: str, new_name: str) -> None:
         self._connection.rename_table(old_name, new_name)
 
