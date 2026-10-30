@@ -27,30 +27,27 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dependencies = [
-    "duckdb >= 1.5",
-    "duckdb_engine",
+    "duckdb >= 1.5, < 2",  # ibis 12 calls fetch_arrow_table, removed in duckdb 2.0
+    "ibis-framework[duckdb,sqlite] >= 12.0",  # older ibis breaks on duckdb >= 1.5
     "loguru",
     "pandas >= 2.2, < 3",
     "pyarrow",
     "pydantic >= 2.7, < 3",
     "pytz",
     "rich",
-    "sqlalchemy == 2.0.37",
+    "sqlglot < 30.18",  # Workaround for incompatibility between Ibis and sqlglot
     "tzdata",
-    # Required by pyhive
-    "future",
-    "python-dateutil",
 ]
 
 [project.optional-dependencies]
 spark = [
-    "thrift",
-    "thrift_sasl",
+    "ibis-framework[pyspark]",
+    "pyspark == 4.0.4",  # ibis 12 requires pyspark < 4.1
 ]
 
 dev = [
     "mypy >= 1.15, < 2",
-    "pandas-stubs",
+    "pandas-stubs < 3",  # match pandas < 3
     "pre-commit",
     "pytest",
     "pytest-cov",
@@ -64,24 +61,27 @@ dev = [
     "sphinx-tabs~=3.4",
 ]
 
-[project.entry-points."sqlalchemy.dialects"]
-hive = "pyhive.sqlalchemy_hive:HiveDialect"
-"hive.http" = "pyhive.sqlalchemy_hive:HiveHTTPDialect"
-"hive.https" = "pyhive.sqlalchemy_hive:HiveHTTPSDialect"
-
 [project.urls]
-Documentation = "https://github.com/NREL/chronify#readme"
-Issues = "https://github.com/NREL/chronify/issues"
-Source = "https://github.com/NREL/chronify"
+Documentation = "https://github.com/NatLabRockies/chronify#readme"
+Issues = "https://github.com/NatLabRockies/chronify/issues"
+Source = "https://github.com/NatLabRockies/chronify"
 
 [tool.mypy]
 files = [
   "src",
 ]
-exclude = [
-    "src/chronify/_vendor/*",
-]
 strict = true
+
+[[tool.mypy.overrides]]
+module = [
+  "ibis",
+  "ibis.*",
+  "pyarrow",
+  "pyarrow.*",
+  "pyspark",
+  "pyspark.*",
+]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 pythonpath = "src"
@@ -100,7 +100,6 @@ exclude = [
     "dist",
     "env",
     "venv",
-    "src/chronify/_vendor/*",
 ]
 
 line-length = 99

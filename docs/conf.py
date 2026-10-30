@@ -7,8 +7,8 @@
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = "Chronify"
-copyright = "2024, NREL"
-author = "NREL"
+copyright = "2026, Alliance for Energy Innovation"
+author = "NLR"
 release = "0.1.0"
 
 # -- General configuration ---------------------------------------------------
