@@ -243,7 +243,9 @@ def check_timestamp_lists(
         return
     msg = msg_prefix
     if len(actual) != len(expected):
-        msg += f"Mismatch number of timestamps: actual: {len(actual)} vs. expected: {len(expected)}\n"
+        msg += (
+            f"Mismatch number of timestamps: actual: {len(actual)} vs. expected: {len(expected)}\n"
+        )
     missing = sorted(set(expected).difference(actual))
     extra = sorted(set(actual).difference(expected))
     msg += "Actual timestamps do not match expected timestamps.\n"
@@ -252,7 +254,7 @@ def check_timestamp_lists(
     raise InvalidTable(msg)
 
 
-def _summarize_timestamps(items: list, head: int = 5, tail: int = 5) -> list:
+def _summarize_timestamps(items: list[Any], head: int = 5, tail: int = 5) -> list[Any]:
     if len(items) <= head + tail:
         return items
     return list(items[:head]) + ["..."] + list(items[-tail:])
